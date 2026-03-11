@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Coon Tree</title><link rel="stylesheet" href="css/panel.css"></head>
+<body data-theme="dark">
+  <div id="toolbar">
+    <div id="toolbar-left"><img src="icons/icon48.png" class="ct-logo" alt=""><span id="stats"></span></div>
+    <div id="toolbar-right">
+      <button id="btn-add-group" title="Add group (date/time default)">📁</button>
+      <button id="btn-add-note" title="Add note">📝</button>
+      <button id="btn-add-sep" title="Add separator">―</button>
+      <span class="tb-div"></span>
+      <button id="btn-save" title="Save selected (or all)">💾</button>
+      <button id="btn-collapse" title="Collapse all">⊟</button>
+      <button id="btn-expand" title="Expand all">⊞</button>
+      <span class="tb-div"></span>
+      <button id="btn-export" title="Export full CoonTree to file">📤</button>
+      <button id="btn-import" title="Import CoonTree file (adds below existing)">📥</button>
+      <span class="tb-div"></span>
+      <button id="btn-theme" title="Theme">🎨</button>
+      <button id="btn-toggle-mode" title="Switch CoonTree popup ↔ tab">🗗</button>
+    </div>
+  </div>
+  <div id="search-bar"><input type="text" id="search" placeholder="Search… (Ctrl+F)" autocomplete="off"><span id="search-x">×</span></div>
+  <div id="tree"></div>
+  <div id="ctx"></div>
+  <input type="text" id="rename-box">
+  <input type="file" id="icon-upload" accept="image/*" style="display:none">
+  <input type="file" id="bg-upload" accept="image/*" style="display:none">
+  <input type="file" id="import-file" accept=".json,.coontree" style="display:none">
+  <script src="js/panel.js"></script>
+</body>
+</html>
