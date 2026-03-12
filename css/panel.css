@@ -97,3 +97,11 @@ body{font-family:"Segoe UI",system-ui,sans-serif;font-size:13px;user-select:none
 #rename-box{position:fixed;z-index:1000;background:var(--btnbg);border:1px solid var(--accent);color:var(--fg);padding:2px 6px;border-radius:3px;font-size:12px;font-family:inherit;outline:none;box-shadow:0 2px 12px rgba(0,0,0,.4);display:none}
 /* Hotkey hint in toolbar */
 .hkhint{font-size:9px;color:var(--fg3);margin-left:2px}
+.cdot{
+width:7px;
+height:7px;
+border-radius:50%;
+flex-shrink:0;
+margin-right:4px;
+display:inline-block;
+}

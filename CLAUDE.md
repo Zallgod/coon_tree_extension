@@ -158,5 +158,4 @@ After proposing the change:
 • Provide the patch or full-file replacement
 • Explain briefly why the change is safe
 
-
 <the coding task will be inserted here>
