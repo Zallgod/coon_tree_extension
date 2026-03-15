@@ -169,6 +169,10 @@ const stateManager = (() => {
   // ═══════════════════════════════════════════════════════════════
   function apply(action) {
     const result = _execute(action);
+    // [CT002] Summary trace — logs decision without touching _execute internals
+    if (action.op && (action.op.startsWith("SYNC_") || action.op === "RECONCILE_PRUNE")) {
+      console.log("[CT TRACE] apply", { op: action.op, ok: result.ok, error: result.error || null });
+    }
     if (result.ok) {
       _rebuildIndexes();
       _version++;

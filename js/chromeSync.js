@@ -42,6 +42,9 @@ const chromeSync = (() => {
       }
     }
 
+    // [CT002]
+    console.log("[CT TRACE] reconcile", { windows: liveWinIds.length, tabs: liveTabIds.length, panelTabId: _panelTabId, panelWindowId: _panelWindowId });
+
     // Phase 1: Prune dead nodes
     stateManager.apply({ op: "RECONCILE_PRUNE", liveWindowIds: liveWinIds, liveTabIds });
 
@@ -81,6 +84,8 @@ const chromeSync = (() => {
   function onTabCreated(tab) {
     if (isPanelTab(tab)) { _panelTabId = tab.id; return; }
     const branch = stateManager.findByChrome("branch", tab.windowId);
+    // [CT002]
+    console.log("[CT TRACE] onTabCreated", { tabId: tab.id, windowId: tab.windowId, branchFound: !!branch, tracked: !!stateManager.findByChrome("tab", tab.id) });
     if (!branch) return;
     // Duplicate check is inside stateManager — will reject if already tracked
     const r = stateManager.apply({ op: "SYNC_ADD_TAB", chromeTab: tab, parentNodeId: branch.id });
@@ -89,6 +94,8 @@ const chromeSync = (() => {
 
   function onTabRemoved(tabId) {
     if (tabId === _panelTabId) { _panelTabId = null; return; }
+    // [CT002]
+    console.log("[CT TRACE] onTabRemoved", { tabId, tracked: !!stateManager.findByChrome("tab", tabId) });
     const r = stateManager.apply({ op: "SYNC_REMOVE", kind: "tab", chromeId: tabId });
     if (r.ok) _notify();
   }
@@ -96,12 +103,16 @@ const chromeSync = (() => {
   function onTabUpdated(tabId, changeInfo, tab) {
     if (isPanelTab(tab)) return;
     const node = stateManager.findByChrome("tab", tabId);
+    // [CT002]
+    console.log("[CT TRACE] onTabUpdated", { tabId, windowId: tab.windowId, found: !!node, keys: Object.keys(changeInfo) });
     if (!node) return;
     const r = stateManager.apply({ op: "SYNC_UPDATE_TAB", nodeId: node.id, changes: changeInfo });
     if (r.ok) _notify();
   }
 
   function onTabMoved(tabId, moveInfo) {
+    // [CT002]
+    console.log("[CT TRACE] onTabMoved", { tabId, windowId: moveInfo.windowId, toIndex: moveInfo.toIndex });
     const r = stateManager.apply({
       op: "SYNC_TAB_MOVED",
       chromeTabId: tabId,
@@ -112,6 +123,8 @@ const chromeSync = (() => {
   }
 
   function onTabDetached(tabId) {
+    // [CT002]
+    console.log("[CT TRACE] onTabDetached", { tabId, tracked: !!stateManager.findByChrome("tab", tabId) });
     // Tab is temporarily homeless — remove from tree (will be re-added on attach)
     const r = stateManager.apply({ op: "SYNC_REMOVE", kind: "tab", chromeId: tabId });
     if (r.ok) _notify();
@@ -121,6 +134,8 @@ const chromeSync = (() => {
     chrome.tabs.get(tabId, tab => {
       if (chrome.runtime.lastError || !tab) return;
       const branch = stateManager.findByChrome("branch", attachInfo.newWindowId);
+      // [CT002]
+      console.log("[CT TRACE] onTabAttached", { tabId, newWindowId: attachInfo.newWindowId, newPosition: attachInfo.newPosition, branchFound: !!branch, tracked: !!stateManager.findByChrome("tab", tabId) });
       if (!branch) return;
       const r = stateManager.apply({
         op: "SYNC_TAB_ATTACHED",
@@ -133,6 +148,8 @@ const chromeSync = (() => {
   }
 
   function onTabActivated(activeInfo) {
+    // [CT002]
+    console.log("[CT TRACE] onTabActivated", { tabId: activeInfo.tabId, windowId: activeInfo.windowId });
     const r = stateManager.apply({
       op: "SYNC_TAB_ACTIVATED",
       chromeWindowId: activeInfo.windowId,
@@ -143,12 +160,16 @@ const chromeSync = (() => {
 
   function onWinCreated(win) {
     if ((win.type !== "normal" && win.type !== "popup") || win.id === _panelWindowId) return;
+    // [CT002]
+    console.log("[CT TRACE] onWinCreated", { windowId: win.id, type: win.type });
     const r = stateManager.apply({ op: "SYNC_ADD_BRANCH", chromeWin: win });
     if (r.ok) _notify();
   }
 
   function onWinRemoved(winId) {
     if (winId === _panelWindowId) { _panelWindowId = null; _panelTabId = null; return; }
+    // [CT002]
+    console.log("[CT TRACE] onWinRemoved", { windowId: winId, tracked: !!stateManager.findByChrome("branch", winId) });
     const r = stateManager.apply({ op: "SYNC_REMOVE", kind: "branch", chromeId: winId });
     if (r.ok) _notify();
   }
