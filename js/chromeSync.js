@@ -42,146 +42,292 @@ const chromeSync = (() => {
       }
     }
 
-    // [CT002]
-    console.log("[CT TRACE] reconcile", { windows: liveWinIds.length, tabs: liveTabIds.length, panelTabId: _panelTabId, panelWindowId: _panelWindowId });
+    console.log("[CT TRACE] reconcile:start", {
+      windows: liveWinIds,
+      tabs: liveTabIds,
+      panelTabId: _panelTabId,
+      panelWindowId: _panelWindowId
+    });
 
     // Phase 1: Prune dead nodes
-    stateManager.apply({ op: "RECONCILE_PRUNE", liveWindowIds: liveWinIds, liveTabIds });
+    const pruneResult = stateManager.apply({ op: "RECONCILE_PRUNE", liveWindowIds: liveWinIds, liveTabIds });
+    console.log("[CT TRACE] reconcile:pruneResult", pruneResult);
 
     // Phase 2: Add windows/tabs that aren't tracked yet
     for (const win of wins) {
       if (isPanelWin(win)) continue;
+
       let branchNode = stateManager.findByChrome("branch", win.id);
+      console.log("[CT TRACE] reconcile:window", {
+        windowId: win.id,
+        focused: !!win.focused,
+        branchFound: !!branchNode,
+        tabCount: (win.tabs || []).filter(t => !isPanelTab(t)).length
+      });
+
       if (!branchNode) {
         const r = stateManager.apply({ op: "SYNC_ADD_BRANCH", chromeWin: win });
+        console.log("[CT TRACE] reconcile:addBranch", { windowId: win.id, result: r });
         if (r.ok) branchNode = stateManager.getNode(r.nodeId);
       }
       if (!branchNode) continue;
 
       // Update focus
-      stateManager.apply({ op: "SYNC_WIN_FOCUS", chromeWindowId: win.focused ? win.id : -1 });
+      const focusResult = stateManager.apply({ op: "SYNC_WIN_FOCUS", chromeWindowId: win.focused ? win.id : -1 });
+      console.log("[CT TRACE] reconcile:focus", { windowId: win.id, result: focusResult });
 
       for (const tab of win.tabs) {
         if (isPanelTab(tab)) continue;
         const existing = stateManager.findByChrome("tab", tab.id);
+        console.log("[CT TRACE] reconcile:tab", {
+          tabId: tab.id,
+          windowId: tab.windowId,
+          existing: !!existing,
+          branchNodeId: branchNode.id
+        });
+
         if (!existing) {
-          stateManager.apply({ op: "SYNC_ADD_TAB", chromeTab: tab, parentNodeId: branchNode.id });
+          const addTabResult = stateManager.apply({ op: "SYNC_ADD_TAB", chromeTab: tab, parentNodeId: branchNode.id });
+          console.log("[CT TRACE] reconcile:addTab", { tabId: tab.id, result: addTabResult });
         } else {
-          stateManager.apply({ op: "SYNC_UPDATE_TAB", nodeId: existing.id, changes: tab });
+          const updateTabResult = stateManager.apply({ op: "SYNC_UPDATE_TAB", nodeId: existing.id, changes: tab });
+          console.log("[CT TRACE] reconcile:updateTab", { tabId: tab.id, nodeId: existing.id, result: updateTabResult });
         }
       }
 
       // Reorder to match Chrome's actual order
-      stateManager.apply({
+      const reorderResult = stateManager.apply({
         op: "SYNC_REORDER_TABS",
         branchNodeId: branchNode.id,
         chromeTabOrder: win.tabs.filter(t => !isPanelTab(t)).map(t => t.id)
       });
+      console.log("[CT TRACE] reconcile:reorder", {
+        windowId: win.id,
+        branchNodeId: branchNode.id,
+        result: reorderResult
+      });
     }
+
+    console.log("[CT TRACE] reconcile:end");
   }
 
   // ─── Event handlers ───
   function onTabCreated(tab) {
-    if (isPanelTab(tab)) { _panelTabId = tab.id; return; }
+    if (isPanelTab(tab)) {
+      console.log("[CT TRACE] onTabCreated:panel", { tabId: tab.id, windowId: tab.windowId });
+      _panelTabId = tab.id;
+      return;
+    }
+
     const branch = stateManager.findByChrome("branch", tab.windowId);
-    // [CT002]
-    console.log("[CT TRACE] onTabCreated", { tabId: tab.id, windowId: tab.windowId, branchFound: !!branch, tracked: !!stateManager.findByChrome("tab", tab.id) });
+    console.log("[CT TRACE] onTabCreated", {
+      tabId: tab.id,
+      windowId: tab.windowId,
+      index: tab.index,
+      branchFound: !!branch,
+      tracked: !!stateManager.findByChrome("tab", tab.id)
+    });
+
     if (!branch) return;
-    // Duplicate check is inside stateManager — will reject if already tracked
+
     const r = stateManager.apply({ op: "SYNC_ADD_TAB", chromeTab: tab, parentNodeId: branch.id });
+    console.log("[CT TRACE] onTabCreated:result", { tabId: tab.id, result: r });
+
     if (r.ok) _notify();
   }
 
-  function onTabRemoved(tabId) {
-    if (tabId === _panelTabId) { _panelTabId = null; return; }
-    // [CT002]
-    console.log("[CT TRACE] onTabRemoved", { tabId, tracked: !!stateManager.findByChrome("tab", tabId) });
+  function onTabRemoved(tabId, removeInfo) {
+    if (tabId === _panelTabId) {
+      console.log("[CT TRACE] onTabRemoved:panel", { tabId, removeInfo });
+      _panelTabId = null;
+      return;
+    }
+
+    console.log("[CT TRACE] onTabRemoved", {
+      tabId,
+      removeInfo,
+      tracked: !!stateManager.findByChrome("tab", tabId)
+    });
+
     const r = stateManager.apply({ op: "SYNC_REMOVE", kind: "tab", chromeId: tabId });
+    console.log("[CT TRACE] onTabRemoved:result", { tabId, result: r });
+
     if (r.ok) _notify();
   }
 
   function onTabUpdated(tabId, changeInfo, tab) {
-    if (isPanelTab(tab)) return;
+    if (isPanelTab(tab)) {
+      console.log("[CT TRACE] onTabUpdated:panel", { tabId, keys: Object.keys(changeInfo || {}) });
+      return;
+    }
+
     const node = stateManager.findByChrome("tab", tabId);
-    // [CT002]
-    console.log("[CT TRACE] onTabUpdated", { tabId, windowId: tab.windowId, found: !!node, keys: Object.keys(changeInfo) });
+    console.log("[CT TRACE] onTabUpdated", {
+      tabId,
+      windowId: tab.windowId,
+      found: !!node,
+      keys: Object.keys(changeInfo || {})
+    });
+
     if (!node) return;
+
     const r = stateManager.apply({ op: "SYNC_UPDATE_TAB", nodeId: node.id, changes: changeInfo });
+    console.log("[CT TRACE] onTabUpdated:result", { tabId, nodeId: node.id, result: r });
+
     if (r.ok) _notify();
   }
 
   function onTabMoved(tabId, moveInfo) {
-    // [CT002]
-    console.log("[CT TRACE] onTabMoved", { tabId, windowId: moveInfo.windowId, toIndex: moveInfo.toIndex });
+    console.log("[CT TRACE] onTabMoved", {
+      tabId,
+      windowId: moveInfo.windowId,
+      fromIndex: moveInfo.fromIndex,
+      toIndex: moveInfo.toIndex,
+      tracked: !!stateManager.findByChrome("tab", tabId)
+    });
+
     const r = stateManager.apply({
       op: "SYNC_TAB_MOVED",
       chromeTabId: tabId,
       toIndex: moveInfo.toIndex,
       chromeWindowId: moveInfo.windowId
     });
+    console.log("[CT TRACE] onTabMoved:result", { tabId, result: r });
+
     if (r.ok) _notify();
   }
 
-  function onTabDetached(tabId) {
-    // [CT002]
-    console.log("[CT TRACE] onTabDetached", { tabId, tracked: !!stateManager.findByChrome("tab", tabId) });
-    // Tab is temporarily homeless — remove from tree (will be re-added on attach)
-    const r = stateManager.apply({ op: "SYNC_REMOVE", kind: "tab", chromeId: tabId });
-    if (r.ok) _notify();
+  function onTabDetached(tabId, detachInfo) {
+    // [CT003] Observational only — no structural mutation.
+    // Node and chromeId index remain intact across detach.
+    // Rebinding occurs in onTabAttached via SYNC_TAB_ATTACHED.
+    console.log("[CT TRACE] onTabDetached", {
+      tabId,
+      detachInfo,
+      tracked: !!stateManager.findByChrome("tab", tabId)
+    });
   }
 
   function onTabAttached(tabId, attachInfo) {
     chrome.tabs.get(tabId, tab => {
-      if (chrome.runtime.lastError || !tab) return;
+      if (chrome.runtime.lastError || !tab) {
+        console.log("[CT TRACE] onTabAttached:getFailed", {
+          tabId,
+          attachInfo,
+          error: chrome.runtime.lastError?.message || null
+        });
+        return;
+      }
+
       const branch = stateManager.findByChrome("branch", attachInfo.newWindowId);
-      // [CT002]
-      console.log("[CT TRACE] onTabAttached", { tabId, newWindowId: attachInfo.newWindowId, newPosition: attachInfo.newPosition, branchFound: !!branch, tracked: !!stateManager.findByChrome("tab", tabId) });
+      console.log("[CT TRACE] onTabAttached", {
+        tabId,
+        newWindowId: attachInfo.newWindowId,
+        newPosition: attachInfo.newPosition,
+        branchFound: !!branch,
+        tracked: !!stateManager.findByChrome("tab", tabId),
+        chromeTabWindowId: tab.windowId
+      });
+
       if (!branch) return;
+
       const r = stateManager.apply({
         op: "SYNC_TAB_ATTACHED",
         chromeTab: tab,
         branchNodeId: branch.id,
         position: attachInfo.newPosition
       });
+      console.log("[CT TRACE] onTabAttached:result", { tabId, branchNodeId: branch.id, result: r });
+
       if (r.ok) _notify();
     });
   }
 
   function onTabActivated(activeInfo) {
-    // [CT002]
-    console.log("[CT TRACE] onTabActivated", { tabId: activeInfo.tabId, windowId: activeInfo.windowId });
+    console.log("[CT TRACE] onTabActivated", {
+      tabId: activeInfo.tabId,
+      windowId: activeInfo.windowId,
+      tracked: !!stateManager.findByChrome("tab", activeInfo.tabId)
+    });
+
     const r = stateManager.apply({
       op: "SYNC_TAB_ACTIVATED",
       chromeWindowId: activeInfo.windowId,
       chromeTabId: activeInfo.tabId
     });
+    console.log("[CT TRACE] onTabActivated:result", { tabId: activeInfo.tabId, result: r });
+
     if (r.ok) _notify();
   }
 
+  function onTabReplaced(addedTabId, removedTabId) {
+    console.log("[CT TRACE] onTabReplaced", {
+      addedTabId,
+      removedTabId,
+      addedTracked: !!stateManager.findByChrome("tab", addedTabId),
+      removedTracked: !!stateManager.findByChrome("tab", removedTabId)
+    });
+  }
+
   function onWinCreated(win) {
-    if ((win.type !== "normal" && win.type !== "popup") || win.id === _panelWindowId) return;
-    // [CT002]
-    console.log("[CT TRACE] onWinCreated", { windowId: win.id, type: win.type });
+    if ((win.type !== "normal" && win.type !== "popup") || win.id === _panelWindowId) {
+      console.log("[CT TRACE] onWinCreated:ignored", {
+        windowId: win.id,
+        type: win.type,
+        panelWindowId: _panelWindowId
+      });
+      return;
+    }
+
+    console.log("[CT TRACE] onWinCreated", {
+      windowId: win.id,
+      type: win.type,
+      focused: !!win.focused,
+      tracked: !!stateManager.findByChrome("branch", win.id)
+    });
+
     const r = stateManager.apply({ op: "SYNC_ADD_BRANCH", chromeWin: win });
+    console.log("[CT TRACE] onWinCreated:result", { windowId: win.id, result: r });
+
     if (r.ok) _notify();
   }
 
   function onWinRemoved(winId) {
-    if (winId === _panelWindowId) { _panelWindowId = null; _panelTabId = null; return; }
-    // [CT002]
-    console.log("[CT TRACE] onWinRemoved", { windowId: winId, tracked: !!stateManager.findByChrome("branch", winId) });
+    if (winId === _panelWindowId) {
+      console.log("[CT TRACE] onWinRemoved:panel", { windowId: winId });
+      _panelWindowId = null;
+      _panelTabId = null;
+      return;
+    }
+
+    console.log("[CT TRACE] onWinRemoved", {
+      windowId: winId,
+      tracked: !!stateManager.findByChrome("branch", winId)
+    });
+
     const r = stateManager.apply({ op: "SYNC_REMOVE", kind: "branch", chromeId: winId });
+    console.log("[CT TRACE] onWinRemoved:result", { windowId: winId, result: r });
+
     if (r.ok) _notify();
   }
 
   function onWinFocusChanged(winId) {
+    console.log("[CT TRACE] onWinFocusChanged", {
+      windowId: winId,
+      tracked: !!stateManager.findByChrome("branch", winId)
+    });
+
     const r = stateManager.apply({ op: "SYNC_WIN_FOCUS", chromeWindowId: winId });
+    console.log("[CT TRACE] onWinFocusChanged:result", { windowId: winId, result: r });
+
     if (r.ok) _notify();
   }
 
   // ─── Execute chrome side effects ───
   function executeSideEffects(effects) {
     if (!effects) return;
+    console.log("[CT TRACE] executeSideEffects", effects);
+
     for (const eff of effects) {
       switch (eff.type) {
         case "CHROME_MOVE_TAB":
@@ -205,12 +351,18 @@ const chromeSync = (() => {
     chrome.tabs.onAttached.addListener(onTabAttached);
     chrome.tabs.onDetached.addListener(onTabDetached);
     chrome.tabs.onActivated.addListener(onTabActivated);
+    chrome.tabs.onReplaced.addListener(onTabReplaced);
     chrome.windows.onCreated.addListener(onWinCreated);
     chrome.windows.onRemoved.addListener(onWinRemoved);
     chrome.windows.onFocusChanged.addListener(onWinFocusChanged);
+
+    console.log("[CT TRACE] registerListeners");
   }
 
-  function _notify() { if (_onUpdate) _onUpdate(); }
+  function _notify() {
+    console.log("[CT TRACE] notify");
+    if (_onUpdate) _onUpdate();
+  }
 
   return {
     reconcile, registerListeners, executeSideEffects,

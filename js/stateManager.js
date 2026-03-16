@@ -168,15 +168,27 @@ const stateManager = (() => {
   // Returns: { ok:bool, error?:string, sideEffects?:[] }
   // ═══════════════════════════════════════════════════════════════
   function apply(action) {
+    console.log("[CT TRACE] apply:start", action);
+
     const result = _execute(action);
-    // [CT002] Summary trace — logs decision without touching _execute internals
-    if (action.op && (action.op.startsWith("SYNC_") || action.op === "RECONCILE_PRUNE")) {
-      console.log("[CT TRACE] apply", { op: action.op, ok: result.ok, error: result.error || null });
-    }
+
+    console.log("[CT TRACE] apply:result", {
+      op: action.op,
+      ok: result.ok,
+      error: result.error || null,
+      nodeId: result.nodeId || null,
+      sideEffects: result.sideEffects || null
+    });
+
     if (result.ok) {
       _rebuildIndexes();
       _version++;
+      console.log("[CT TRACE] apply:postRebuild", {
+        op: action.op,
+        version: _version
+      });
     }
+
     return result;
   }
 
@@ -447,11 +459,22 @@ const stateManager = (() => {
 
   // ─── Internal helpers ───
   function _detachNode(nodeId) {
+    console.log("[CT TRACE] _detachNode:start", { nodeId });
+
     const parent = _parentMap.get(nodeId);
-    if (!parent) return { ok: false, error: "ORPHAN_OR_ROOT" };
+    if (!parent) {
+      console.log("[CT TRACE] _detachNode:error", { nodeId, error: "ORPHAN_OR_ROOT" });
+      return { ok: false, error: "ORPHAN_OR_ROOT" };
+    }
+
     const idx = parent.children.findIndex(c => c.id === nodeId);
-    if (idx < 0) return { ok: false, error: "NOT_IN_PARENT" };
+    if (idx < 0) {
+      console.log("[CT TRACE] _detachNode:error", { nodeId, error: "NOT_IN_PARENT", parentId: parent.id });
+      return { ok: false, error: "NOT_IN_PARENT" };
+    }
+
     parent.children.splice(idx, 1);
+    console.log("[CT TRACE] _detachNode:ok", { nodeId, parentId: parent.id, index: idx });
     return { ok: true };
   }
 
