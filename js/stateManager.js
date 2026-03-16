@@ -163,6 +163,18 @@ const stateManager = (() => {
     return { id: newId(), kind: "divider", state: "divider", separatorStyle: style || 0, children: [], collapsed: false };
   }
 
+  // ─── Mutation context extractor (passive, for diagnostics only) ───
+  function _extractMutationContext(action) {
+    const ctx = { op: action.op };
+    if (action.chromeWin) ctx.chromeWindowId = action.chromeWin.id;
+    if (action.chromeTab) ctx.chromeTabId = action.chromeTab.id;
+    if (action.chromeWindowId !== undefined) ctx.chromeWindowId = action.chromeWindowId;
+    if (action.chromeTabId !== undefined) ctx.chromeTabId = action.chromeTabId;
+    if (action.chromeId !== undefined) { ctx.chromeId = action.chromeId; ctx.kind = action.kind; }
+    if (action.nodeId !== undefined) ctx.nodeId = action.nodeId;
+    return ctx;
+  }
+
   // ═══════════════════════════════════════════════════════════════
   // apply(action) — THE SINGLE MUTATION GATE
   // Returns: { ok:bool, error?:string, sideEffects?:[] }
@@ -171,6 +183,25 @@ const stateManager = (() => {
     console.log("[CT TRACE] apply:start", action);
 
     const result = _execute(action);
+
+    // ─── CT006: Mutation trace ───
+    console.log("[CT MUTATION]", {
+      ..._extractMutationContext(action),
+      result: result.ok ? "ok" : "rejected",
+      error: result.error || null,
+      nodeId: result.nodeId || null
+    });
+
+    // ─── CT006: Branch creation trace ───
+    if (action.op === "SYNC_ADD_BRANCH") {
+      console.log("[CT BRANCH]", {
+        windowId: action.chromeWin ? action.chromeWin.id : null,
+        windowType: action.chromeWin ? (action.chromeWin.type || "normal") : null,
+        nodeId: result.nodeId || null,
+        result: result.ok ? "ok" : "rejected",
+        error: result.error || null
+      });
+    }
 
     console.log("[CT TRACE] apply:result", {
       op: action.op,
@@ -534,3 +565,49 @@ const stateManager = (() => {
     forceReindex() { _rebuildIndexes(); },
   };
 })();
+
+// ─── CT006: DevTools inspection helper ───
+// Usage: ct.tree() in DevTools console
+// Read-only snapshot — does not mutate state
+const ct = {
+  tree() {
+    const tree = stateManager.getTree();
+    const version = stateManager.getVersion();
+
+    function summarize(node) {
+      const s = { id: node.id, kind: node.kind, state: node.state };
+      if (node.kind === "branch") {
+        s.chromeWindowId = node.chromeId || null;
+        s.windowType = node.windowType || null;
+        s.focused = !!node.focused;
+        s.customTitle = node.customTitle || "";
+        const tabCount = (node.children || []).reduce((n, c) => n + (c.kind === "tab" ? 1 : 0), 0);
+        s.tabCount = tabCount;
+      }
+      if (node.kind === "tab") {
+        s.chromeTabId = node.chromeId || null;
+        s.title = node.title || "";
+        s.url = node.url || "";
+        s.active = !!node.active;
+      }
+      if (node.kind === "group") {
+        s.customTitle = node.customTitle || "";
+      }
+      if (node.kind === "memo") {
+        s.title = node.title || "";
+      }
+      if (node.children && node.children.length) {
+        s.children = node.children.map(summarize);
+      }
+      return s;
+    }
+
+    const snapshot = {
+      version: version,
+      tree: summarize(tree)
+    };
+
+    console.log("[CT TREE]", snapshot);
+    return snapshot;
+  }
+};

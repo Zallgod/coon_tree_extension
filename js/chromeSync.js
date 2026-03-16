@@ -137,6 +137,13 @@ const chromeSync = (() => {
       return;
     }
 
+    console.log("[CT EVENT] tabs.onCreated", {
+      tabId: tab.id,
+      windowId: tab.windowId,
+      index: tab.index,
+      url: tab.url || tab.pendingUrl || ""
+    });
+
     const branch = stateManager.findByChrome("branch", tab.windowId);
 
     console.log("[CT TRACE] onTabCreated", {
@@ -171,6 +178,12 @@ const chromeSync = (() => {
       return;
     }
 
+    console.log("[CT EVENT] tabs.onRemoved", {
+      tabId: tabId,
+      windowId: removeInfo.windowId,
+      isWindowClosing: removeInfo.isWindowClosing
+    });
+
     const r = stateManager.apply({
       op: "SYNC_REMOVE",
       kind: "tab",
@@ -187,6 +200,13 @@ const chromeSync = (() => {
     const node = stateManager.findByChrome("tab", tabId);
     if (!node) return;
 
+    console.log("[CT EVENT] tabs.onUpdated", {
+      tabId: tabId,
+      windowId: tab.windowId,
+      changed: Object.keys(changeInfo),
+      url: changeInfo.url || undefined
+    });
+
     const r = stateManager.apply({
       op: "SYNC_UPDATE_TAB",
       nodeId: node.id,
@@ -199,6 +219,13 @@ const chromeSync = (() => {
   function onTabMoved(tabId, moveInfo) {
 
     if (isPanelTab({ id: tabId })) return;
+
+    console.log("[CT EVENT] tabs.onMoved", {
+      tabId: tabId,
+      windowId: moveInfo.windowId,
+      fromIndex: moveInfo.fromIndex,
+      toIndex: moveInfo.toIndex
+    });
 
     const r = stateManager.apply({
       op: "SYNC_TAB_MOVED",
@@ -214,6 +241,12 @@ const chromeSync = (() => {
 
     if (isPanelTab({ id: tabId })) return;
 
+    console.log("[CT EVENT] tabs.onDetached", {
+      tabId: tabId,
+      windowId: detachInfo.oldWindowId,
+      oldPosition: detachInfo.oldPosition
+    });
+
     console.log("[CT TRACE] onTabDetached", {
       tabId,
       detachInfo
@@ -227,6 +260,13 @@ const chromeSync = (() => {
       if (chrome.runtime.lastError || !tab) return;
 
       if (isPanelTab(tab)) return;
+
+      console.log("[CT EVENT] tabs.onAttached", {
+        tabId: tabId,
+        windowId: attachInfo.newWindowId,
+        newPosition: attachInfo.newPosition,
+        url: tab.url || ""
+      });
 
       const branch = stateManager.findByChrome(
         "branch",
@@ -248,6 +288,11 @@ const chromeSync = (() => {
 
   function onTabActivated(activeInfo) {
 
+    console.log("[CT EVENT] tabs.onActivated", {
+      tabId: activeInfo.tabId,
+      windowId: activeInfo.windowId
+    });
+
     const r = stateManager.apply({
       op: "SYNC_TAB_ACTIVATED",
       chromeWindowId: activeInfo.windowId,
@@ -262,6 +307,12 @@ const chromeSync = (() => {
     if (win.type !== "normal" || isPanelWin(win)) {
       return;
     }
+
+    console.log("[CT EVENT] windows.onCreated", {
+      windowId: win.id,
+      windowType: win.type,
+      focused: win.focused
+    });
 
     const r = stateManager.apply({
       op: "SYNC_ADD_BRANCH",
@@ -279,6 +330,10 @@ const chromeSync = (() => {
       return;
     }
 
+    console.log("[CT EVENT] windows.onRemoved", {
+      windowId: winId
+    });
+
     const r = stateManager.apply({
       op: "SYNC_REMOVE",
       kind: "branch",
@@ -289,6 +344,10 @@ const chromeSync = (() => {
   }
 
   function onWinFocusChanged(winId) {
+
+    console.log("[CT EVENT] windows.onFocusChanged", {
+      windowId: winId
+    });
 
     const r = stateManager.apply({
       op: "SYNC_WIN_FOCUS",
