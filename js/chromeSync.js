@@ -45,7 +45,7 @@ const chromeSync = (() => {
     const liveTabIds = [];
 
     for (const win of wins) {
-      if (isPanelWin(win)) continue;
+      if (win.type !== "normal" || isPanelWin(win)) continue;
 
       liveWinIds.push(win.id);
 
@@ -71,7 +71,7 @@ const chromeSync = (() => {
     console.log("[CT TRACE] reconcile:pruneResult", pruneResult);
 
     for (const win of wins) {
-      if (isPanelWin(win)) continue;
+      if (win.type !== "normal" || isPanelWin(win)) continue;
 
       let branchNode = stateManager.findByChrome("branch", win.id);
 
@@ -259,7 +259,7 @@ const chromeSync = (() => {
 
   function onWinCreated(win) {
 
-    if ((win.type !== "normal" && win.type !== "popup") || isPanelWin(win)) {
+    if (win.type !== "normal" || isPanelWin(win)) {
       return;
     }
 
