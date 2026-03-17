@@ -218,6 +218,26 @@ const stateManager = (() => {
       });
     }
 
+    // ─── CT008: Branch removal trace ───
+    if (action.op === "SYNC_REMOVE" && action.kind === "branch") {
+      if (CT_DEBUG.all || CT_DEBUG.engine) console.log("[CT BRANCH]", {
+        op: "SYNC_REMOVE",
+        chromeId: action.chromeId || null,
+        result: result.ok ? "ok" : "rejected",
+        error: result.error || null
+      });
+    }
+
+    // ─── CT008: Branch save-and-close trace ───
+    if (action.op === "SAVE_AND_CLOSE") {
+      if (CT_DEBUG.all || CT_DEBUG.engine) console.log("[CT BRANCH]", {
+        op: "SAVE_AND_CLOSE",
+        nodeId: action.nodeId || null,
+        result: result.ok ? "ok" : "rejected",
+        error: result.error || null
+      });
+    }
+
     if (CT_DEBUG.all || CT_DEBUG.engine) console.log("[CT TRACE] apply:result", {
       op: action.op,
       ok: result.ok,
