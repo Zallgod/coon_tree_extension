@@ -3,7 +3,21 @@
 /*
  * persistence.js — Coon Tree Persistence Engine
  *
- * Storage format (normalized, no nested children):
+ * CT010 — Workspace-level persistence
+ *
+ * Storage format (normalized, workspace envelope):
+ *   ct_data: {
+ *     workspace: {
+ *       id: string,
+ *       createdAt: number,
+ *       updatedAt: number,
+ *       tree: { ent:{id→flat_node}, ord:{id→[childIds]}, root:id },
+ *       meta: {}
+ *     },
+ *     ver: number
+ *   }
+ *
+ * Legacy format (auto-migrated on load):
  *   ct_data: { ent:{id→flat_node}, ord:{id→[childIds]}, root:id, ver:number }
  *
  * Crash recovery via Write-Ahead Log:
@@ -11,7 +25,7 @@
  *   If ct_wal exists on load, we know a crash occurred mid-mutation.
  *   The stored ct_data is the last known-good state (written before mutation started).
  *
- * Undo is stored as an in-memory stack of normalized snapshots.
+ * Undo is stored as an in-memory stack of normalized tree snapshots (not workspace).
  */
 
 const persistence = (() => {
@@ -39,7 +53,7 @@ const persistence = (() => {
         for (let i = children.length - 1; i >= 0; i--) stk.push(children[i]);
       }
     }
-    return { ent, ord, root: tree.id, ver: stateManager.getVersion() };
+    return { ent, ord, root: tree.id };
   }
 
   // ─── Deserialize normalized format to tree ───
@@ -70,6 +84,31 @@ const persistence = (() => {
     };
   }
 
+  // ─── CT010: Detect and migrate legacy format ───
+  function _migrateIfLegacy(data) {
+    // New format: has workspace envelope
+    if (data.workspace && data.workspace.tree) {
+      return data;
+    }
+    // Legacy format: top-level ent/ord/root — wrap into workspace
+    if (data.ent) {
+      const now = Date.now();
+      console.log("[persistence] CT010: Migrating legacy tree format to workspace envelope");
+      return {
+        workspace: {
+          id: "ws1",
+          createdAt: now,
+          updatedAt: now,
+          tree: { ent: data.ent, ord: data.ord, root: data.root },
+          meta: {}
+        },
+        ver: data.ver || 0
+      };
+    }
+    // Unknown format — return as-is, let downstream handle failure
+    return data;
+  }
+
   // ─── Load from storage ───
   async function load() {
     return new Promise(resolve => {
@@ -83,15 +122,34 @@ const persistence = (() => {
 
         if (result[STORAGE_KEY]) {
           try {
-            const data =
+            const raw =
               typeof result[STORAGE_KEY] === "string"
                 ? JSON.parse(result[STORAGE_KEY])
                 : result[STORAGE_KEY];
 
-            const tree = deserialize(data);
-            stateManager.replaceTree(tree);
-            stateManager.forceReindex();
-            console.log("[persistence] Loaded tree with", Object.keys(data.ent || {}).length, "nodes");
+            // CT010: Detect format and migrate if legacy
+            const data = _migrateIfLegacy(raw);
+
+            if (data.workspace && data.workspace.tree) {
+              // New workspace format
+              const tree = deserialize(data.workspace.tree);
+              const ws = {
+                id: data.workspace.id || "ws1",
+                createdAt: data.workspace.createdAt || Date.now(),
+                updatedAt: data.workspace.updatedAt || Date.now(),
+                tree: tree,
+                meta: data.workspace.meta || {}
+              };
+              stateManager.replaceWorkspace(ws);
+              stateManager.forceReindex();
+              console.log("[persistence] Loaded workspace with", Object.keys(data.workspace.tree.ent || {}).length, "nodes");
+            } else {
+              // Fallback: try direct deserialize (should not happen after migration)
+              const tree = deserialize(raw);
+              stateManager.replaceTree(tree);
+              stateManager.forceReindex();
+              console.log("[persistence] Loaded tree (fallback) with unknown node count");
+            }
           } catch (e) {
             console.error("[persistence] Failed to load tree:", e);
           }
@@ -114,7 +172,19 @@ const persistence = (() => {
   function saveNow() {
     const ver = stateManager.getVersion();
     if (ver === _lastSavedVersion) return;
-    const data = serialize(stateManager.getTree());
+    // CT010: Save full workspace envelope
+    const ws = stateManager.getWorkspace();
+    const treeData = serialize(stateManager.getTree());
+    const data = {
+      workspace: {
+        id: ws.id,
+        createdAt: ws.createdAt,
+        updatedAt: ws.updatedAt,
+        tree: treeData,
+        meta: ws.meta
+      },
+      ver: ver
+    };
     chrome.storage.local.set({ [STORAGE_KEY]: data });
     _lastSavedVersion = ver;
   }
@@ -130,9 +200,11 @@ const persistence = (() => {
     chrome.storage.local.remove(WAL_KEY);
   }
 
-  // ─── Undo ───
+  // ─── Undo (tree-only snapshots, ephemeral) ───
   function pushUndo() {
-    _undoStack.push(serialize(stateManager.getTree()));
+    const treeData = serialize(stateManager.getTree());
+    treeData.ver = stateManager.getVersion();
+    _undoStack.push(treeData);
     if (_undoStack.length > MAX_UNDO) _undoStack.shift();
   }
 

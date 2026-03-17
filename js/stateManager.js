@@ -100,6 +100,11 @@ const _CT_IS_BACKGROUND = (function () {
 /*
  * stateManager.js — Coon Tree State Engine
  *
+ * CT010 — Workspace container
+ *   The workspace is the top-level persisted object.
+ *   The tree is a property of the workspace.
+ *   All internal references use _workspace.tree.
+ *
  * INVARIANTS:
  *   1. Every node has a unique `id` (nodeId). This is the stable identity.
  *   2. `chromeId` is a transient runtime binding, never part of identity.
@@ -110,7 +115,16 @@ const _CT_IS_BACKGROUND = (function () {
  */
 
 const stateManager = (() => {
-  let _tree = { id: "root", kind: "root", title: "Coon Tree", children: [], collapsed: false };
+  // ─── CT010: Workspace container (top-level persisted object) ───
+  const _initTime = Date.now();
+  let _workspace = {
+    id: "ws1",
+    createdAt: _initTime,
+    updatedAt: _initTime,
+    tree: { id: "root", kind: "root", title: "Coon Tree", children: [], collapsed: false },
+    meta: {}
+  };
+
   let _seq = Date.now(); // monotonic ID sequence
   let _version = 0;      // bumps on every successful apply — lets UI skip stale renders
 
@@ -123,7 +137,7 @@ const stateManager = (() => {
 
   function _rebuildIndexes() {
     _nodeMap.clear(); _parentMap.clear(); _chromeMap.clear();
-    const stk = [_tree];
+    const stk = [_workspace.tree];
     while (stk.length) {
       const cur = stk.pop();
       // Dup check: if this id already exists, we have corruption — skip the duplicate
@@ -148,11 +162,13 @@ const stateManager = (() => {
   function newId() { return "ct" + (_seq++); }
 
   // ─── Read-only queries (safe to call anytime) ───
-  function getTree() { return _tree; }
+  function getTree() { return _workspace.tree; }
   function getVersion() { return _version; }
   function getNode(nodeId) { return _nodeMap.get(nodeId) || null; }
   function getParent(nodeId) { return _parentMap.get(nodeId) || null; }
-  function getRoot() { return _tree; }
+  function getRoot() { return _workspace.tree; }
+  // CT010: Workspace getter
+  function getWorkspace() { return _workspace; }
 
   // Find nodeId by chromeId (O(1) — the key safety mechanism)
   function findByChrome(kind, chromeId) {
@@ -355,6 +371,8 @@ const stateManager = (() => {
     if (result.ok) {
       _rebuildIndexes();
       _version++;
+      // CT010: Update workspace timestamp on successful mutation
+      _workspace.updatedAt = Date.now();
       if (CT_DEBUG.all || CT_DEBUG.rebuild) {
         const _rebuildPayload = { op: action.op, version: _version };
         console.log("[CT TRACE] apply:postRebuild", _rebuildPayload);
@@ -376,11 +394,11 @@ const stateManager = (() => {
         const node = makeBranch(chromeWin);
         // Insert after last live branch at root level
         let idx = 0;
-        for (let i = 0; i < _tree.children.length; i++) {
-          if (_tree.children[i].kind === "branch" && _tree.children[i].state === "live") idx = i + 1;
+        for (let i = 0; i < _workspace.tree.children.length; i++) {
+          if (_workspace.tree.children[i].kind === "branch" && _workspace.tree.children[i].state === "live") idx = i + 1;
           else break;
         }
-        _tree.children.splice(idx, 0, node);
+        _workspace.tree.children.splice(idx, 0, node);
         return { ok: true, nodeId: node.id };
       }
 
@@ -489,7 +507,7 @@ const stateManager = (() => {
       // ─── CHROME SYNC: Window focus ───
       case "SYNC_WIN_FOCUS": {
         const { chromeWindowId } = action;
-        const stk = [_tree];
+        const stk = [_workspace.tree];
         while (stk.length) {
           const cur = stk.pop();
           if (cur.kind === "branch" && cur.state === "live") cur.focused = (cur.chromeId === chromeWindowId);
@@ -566,7 +584,7 @@ const stateManager = (() => {
 
       // ─── USER: Append child to parent ───
       case "APPEND": {
-        const parent = action.parentId ? _nodeMap.get(action.parentId) : _tree;
+        const parent = action.parentId ? _nodeMap.get(action.parentId) : _workspace.tree;
         if (!parent || !parent.children) return { ok: false, error: "PARENT_NOT_FOUND" };
         if (!action.node || !action.node.id) return { ok: false, error: "INVALID_NODE" };
         parent.children.push(action.node);
@@ -577,7 +595,7 @@ const stateManager = (() => {
       case "INSERT_AFTER": {
         const ref = _nodeMap.get(action.afterId);
         if (!ref) return { ok: false, error: "REF_NOT_FOUND" };
-        const par = _parentMap.get(action.afterId) || _tree;
+        const par = _parentMap.get(action.afterId) || _workspace.tree;
         const idx = par.children.indexOf(ref);
         par.children.splice(idx + 1, 0, action.node);
         return { ok: true };
@@ -614,14 +632,15 @@ const stateManager = (() => {
       case "RECONCILE_PRUNE": {
         const { liveWindowIds, liveTabIds } = action;
         const ow = new Set(liveWindowIds), ot = new Set(liveTabIds);
-        _pruneDeadIterative(_tree, ow, ot);
+        _pruneDeadIterative(_workspace.tree, ow, ot);
         return { ok: true };
       }
 
       // ─── FULL TREE REPLACE (for undo/import) ───
       case "REPLACE_TREE": {
         if (!action.tree || !action.tree.id) return { ok: false, error: "INVALID_TREE" };
-        _tree = action.tree;
+        // CT010: Replace tree inside workspace, preserve workspace container
+        _workspace.tree = action.tree;
         return { ok: true };
       }
 
@@ -708,6 +727,7 @@ const stateManager = (() => {
   return {
     // Queries (read-only, always safe)
     getTree, getVersion, getNode, getParent, getRoot,
+    getWorkspace,
     findByChrome, isDescendant, findLiveBranchAncestor,
     walkSubtree, collectUrls, cloneAsKept, newId, assignFreshIds,
     // Factories
@@ -717,6 +737,15 @@ const stateManager = (() => {
     // Rebuild (called by persistence on load)
     replaceTree(t) { return apply({ op: "REPLACE_TREE", tree: t }); },
     forceReindex() { _rebuildIndexes(); },
+    // CT010: Replace workspace metadata (called by persistence on load)
+    replaceWorkspace(ws) {
+      if (!ws || !ws.tree || !ws.tree.id) return;
+      _workspace.id = ws.id || _workspace.id;
+      _workspace.createdAt = ws.createdAt || _workspace.createdAt;
+      _workspace.updatedAt = ws.updatedAt || _workspace.updatedAt;
+      _workspace.meta = ws.meta || _workspace.meta;
+      this.replaceTree(ws.tree);
+    },
   };
 })();
 
