@@ -1,6 +1,21 @@
 "use strict";
 
 /*
+ * CT007 — Debug Configuration
+ *
+ * Controls CT006 instrumentation output.
+ * All flags default to false (silent operation).
+ * Set `all: true` to enable every category, or enable categories individually.
+ * These are static constants — do not mutate at runtime.
+ */
+const CT_DEBUG = Object.freeze({
+  all:       true,   // master switch — enables all categories when true
+  lifecycle: false,   // Chrome event handlers (chromeSync.js)
+  engine:    false,   // stateManager.apply / mutation traces
+  rebuild:   false,   // rebuild / version tracking
+});
+
+/*
  * stateManager.js — Coon Tree State Engine
  *
  * INVARIANTS:
@@ -180,12 +195,12 @@ const stateManager = (() => {
   // Returns: { ok:bool, error?:string, sideEffects?:[] }
   // ═══════════════════════════════════════════════════════════════
   function apply(action) {
-    console.log("[CT TRACE] apply:start", action);
+    if (CT_DEBUG.all || CT_DEBUG.engine) console.log("[CT TRACE] apply:start", action);
 
     const result = _execute(action);
 
     // ─── CT006: Mutation trace ───
-    console.log("[CT MUTATION]", {
+    if (CT_DEBUG.all || CT_DEBUG.engine) console.log("[CT MUTATION]", {
       ..._extractMutationContext(action),
       result: result.ok ? "ok" : "rejected",
       error: result.error || null,
@@ -194,7 +209,7 @@ const stateManager = (() => {
 
     // ─── CT006: Branch creation trace ───
     if (action.op === "SYNC_ADD_BRANCH") {
-      console.log("[CT BRANCH]", {
+      if (CT_DEBUG.all || CT_DEBUG.engine) console.log("[CT BRANCH]", {
         windowId: action.chromeWin ? action.chromeWin.id : null,
         windowType: action.chromeWin ? (action.chromeWin.type || "normal") : null,
         nodeId: result.nodeId || null,
@@ -203,7 +218,7 @@ const stateManager = (() => {
       });
     }
 
-    console.log("[CT TRACE] apply:result", {
+    if (CT_DEBUG.all || CT_DEBUG.engine) console.log("[CT TRACE] apply:result", {
       op: action.op,
       ok: result.ok,
       error: result.error || null,
@@ -214,7 +229,7 @@ const stateManager = (() => {
     if (result.ok) {
       _rebuildIndexes();
       _version++;
-      console.log("[CT TRACE] apply:postRebuild", {
+      if (CT_DEBUG.all || CT_DEBUG.rebuild) console.log("[CT TRACE] apply:postRebuild", {
         op: action.op,
         version: _version
       });
@@ -490,22 +505,22 @@ const stateManager = (() => {
 
   // ─── Internal helpers ───
   function _detachNode(nodeId) {
-    console.log("[CT TRACE] _detachNode:start", { nodeId });
+    if (CT_DEBUG.all || CT_DEBUG.engine) console.log("[CT TRACE] _detachNode:start", { nodeId });
 
     const parent = _parentMap.get(nodeId);
     if (!parent) {
-      console.log("[CT TRACE] _detachNode:error", { nodeId, error: "ORPHAN_OR_ROOT" });
+      if (CT_DEBUG.all || CT_DEBUG.engine) console.log("[CT TRACE] _detachNode:error", { nodeId, error: "ORPHAN_OR_ROOT" });
       return { ok: false, error: "ORPHAN_OR_ROOT" };
     }
 
     const idx = parent.children.findIndex(c => c.id === nodeId);
     if (idx < 0) {
-      console.log("[CT TRACE] _detachNode:error", { nodeId, error: "NOT_IN_PARENT", parentId: parent.id });
+      if (CT_DEBUG.all || CT_DEBUG.engine) console.log("[CT TRACE] _detachNode:error", { nodeId, error: "NOT_IN_PARENT", parentId: parent.id });
       return { ok: false, error: "NOT_IN_PARENT" };
     }
 
     parent.children.splice(idx, 1);
-    console.log("[CT TRACE] _detachNode:ok", { nodeId, parentId: parent.id, index: idx });
+    if (CT_DEBUG.all || CT_DEBUG.engine) console.log("[CT TRACE] _detachNode:ok", { nodeId, parentId: parent.id, index: idx });
     return { ok: true };
   }
 

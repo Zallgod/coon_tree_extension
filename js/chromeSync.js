@@ -55,7 +55,7 @@ const chromeSync = (() => {
       }
     }
 
-    console.log("[CT TRACE] reconcile:start", {
+    if (CT_DEBUG.all || CT_DEBUG.lifecycle) console.log("[CT TRACE] reconcile:start", {
       windows: liveWinIds,
       tabs: liveTabIds,
       panelTabId: _panelTabId,
@@ -68,7 +68,7 @@ const chromeSync = (() => {
       liveTabIds
     });
 
-    console.log("[CT TRACE] reconcile:pruneResult", pruneResult);
+    if (CT_DEBUG.all || CT_DEBUG.lifecycle) console.log("[CT TRACE] reconcile:pruneResult", pruneResult);
 
     for (const win of wins) {
       if (win.type !== "normal" || isPanelWin(win)) continue;
@@ -120,16 +120,16 @@ const chromeSync = (() => {
       });
     }
 
-    console.log("[CT TRACE] reconcile:end");
+    if (CT_DEBUG.all || CT_DEBUG.lifecycle) console.log("[CT TRACE] reconcile:end");
   }
 
   function onTabCreated(tab) {
 
     // DEBUG LOG (temporary)
-    console.log("[CT DEBUG] TAB OBJECT", tab);
+    if (CT_DEBUG.all || CT_DEBUG.lifecycle) console.log("[CT DEBUG] TAB OBJECT", tab);
 
     if (isPanelTab(tab)) {
-      console.log("[CT TRACE] onTabCreated:panel", {
+      if (CT_DEBUG.all || CT_DEBUG.lifecycle) console.log("[CT TRACE] onTabCreated:panel", {
         tabId: tab.id,
         windowId: tab.windowId
       });
@@ -137,7 +137,7 @@ const chromeSync = (() => {
       return;
     }
 
-    console.log("[CT EVENT] tabs.onCreated", {
+    if (CT_DEBUG.all || CT_DEBUG.lifecycle) console.log("[CT EVENT] tabs.onCreated", {
       tabId: tab.id,
       windowId: tab.windowId,
       index: tab.index,
@@ -146,7 +146,7 @@ const chromeSync = (() => {
 
     const branch = stateManager.findByChrome("branch", tab.windowId);
 
-    console.log("[CT TRACE] onTabCreated", {
+    if (CT_DEBUG.all || CT_DEBUG.lifecycle) console.log("[CT TRACE] onTabCreated", {
       tabId: tab.id,
       windowId: tab.windowId,
       index: tab.index,
@@ -162,7 +162,7 @@ const chromeSync = (() => {
       parentNodeId: branch.id
     });
 
-    console.log("[CT TRACE] onTabCreated:result", {
+    if (CT_DEBUG.all || CT_DEBUG.lifecycle) console.log("[CT TRACE] onTabCreated:result", {
       tabId: tab.id,
       result: r
     });
@@ -173,12 +173,12 @@ const chromeSync = (() => {
   function onTabRemoved(tabId, removeInfo) {
 
     if (tabId === _panelTabId) {
-      console.log("[CT TRACE] onTabRemoved:panel", { tabId });
+      if (CT_DEBUG.all || CT_DEBUG.lifecycle) console.log("[CT TRACE] onTabRemoved:panel", { tabId });
       _panelTabId = null;
       return;
     }
 
-    console.log("[CT EVENT] tabs.onRemoved", {
+    if (CT_DEBUG.all || CT_DEBUG.lifecycle) console.log("[CT EVENT] tabs.onRemoved", {
       tabId: tabId,
       windowId: removeInfo.windowId,
       isWindowClosing: removeInfo.isWindowClosing
@@ -200,7 +200,7 @@ const chromeSync = (() => {
     const node = stateManager.findByChrome("tab", tabId);
     if (!node) return;
 
-    console.log("[CT EVENT] tabs.onUpdated", {
+    if (CT_DEBUG.all || CT_DEBUG.lifecycle) console.log("[CT EVENT] tabs.onUpdated", {
       tabId: tabId,
       windowId: tab.windowId,
       changed: Object.keys(changeInfo),
@@ -220,7 +220,7 @@ const chromeSync = (() => {
 
     if (isPanelTab({ id: tabId })) return;
 
-    console.log("[CT EVENT] tabs.onMoved", {
+    if (CT_DEBUG.all || CT_DEBUG.lifecycle) console.log("[CT EVENT] tabs.onMoved", {
       tabId: tabId,
       windowId: moveInfo.windowId,
       fromIndex: moveInfo.fromIndex,
@@ -241,13 +241,13 @@ const chromeSync = (() => {
 
     if (isPanelTab({ id: tabId })) return;
 
-    console.log("[CT EVENT] tabs.onDetached", {
+    if (CT_DEBUG.all || CT_DEBUG.lifecycle) console.log("[CT EVENT] tabs.onDetached", {
       tabId: tabId,
       windowId: detachInfo.oldWindowId,
       oldPosition: detachInfo.oldPosition
     });
 
-    console.log("[CT TRACE] onTabDetached", {
+    if (CT_DEBUG.all || CT_DEBUG.lifecycle) console.log("[CT TRACE] onTabDetached", {
       tabId,
       detachInfo
     });
@@ -261,7 +261,7 @@ const chromeSync = (() => {
 
       if (isPanelTab(tab)) return;
 
-      console.log("[CT EVENT] tabs.onAttached", {
+      if (CT_DEBUG.all || CT_DEBUG.lifecycle) console.log("[CT EVENT] tabs.onAttached", {
         tabId: tabId,
         windowId: attachInfo.newWindowId,
         newPosition: attachInfo.newPosition,
@@ -288,7 +288,7 @@ const chromeSync = (() => {
 
   function onTabActivated(activeInfo) {
 
-    console.log("[CT EVENT] tabs.onActivated", {
+    if (CT_DEBUG.all || CT_DEBUG.lifecycle) console.log("[CT EVENT] tabs.onActivated", {
       tabId: activeInfo.tabId,
       windowId: activeInfo.windowId
     });
@@ -308,7 +308,7 @@ const chromeSync = (() => {
       return;
     }
 
-    console.log("[CT EVENT] windows.onCreated", {
+    if (CT_DEBUG.all || CT_DEBUG.lifecycle) console.log("[CT EVENT] windows.onCreated", {
       windowId: win.id,
       windowType: win.type,
       focused: win.focused
@@ -330,7 +330,7 @@ const chromeSync = (() => {
       return;
     }
 
-    console.log("[CT EVENT] windows.onRemoved", {
+    if (CT_DEBUG.all || CT_DEBUG.lifecycle) console.log("[CT EVENT] windows.onRemoved", {
       windowId: winId
     });
 
@@ -345,7 +345,7 @@ const chromeSync = (() => {
 
   function onWinFocusChanged(winId) {
 
-    console.log("[CT EVENT] windows.onFocusChanged", {
+    if (CT_DEBUG.all || CT_DEBUG.lifecycle) console.log("[CT EVENT] windows.onFocusChanged", {
       windowId: winId
     });
 
@@ -405,7 +405,7 @@ const chromeSync = (() => {
     chrome.windows.onRemoved.addListener(onWinRemoved);
     chrome.windows.onFocusChanged.addListener(onWinFocusChanged);
 
-    console.log("[CT TRACE] registerListeners");
+    if (CT_DEBUG.all || CT_DEBUG.lifecycle) console.log("[CT TRACE] registerListeners");
   }
 
   function _notify() {
