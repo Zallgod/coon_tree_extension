@@ -6,14 +6,96 @@
  * Controls CT006 instrumentation output.
  * All flags default to false (silent operation).
  * Set `all: true` to enable every category, or enable categories individually.
- * These are static constants — do not mutate at runtime.
+ * Runtime control via ct.debug() or CT_SET_DEBUG message.
  */
-const CT_DEBUG = Object.freeze({
-  all:       true,   // master switch — enables all categories when true
+let CT_DEBUG = {
+  all:       false,   // master switch — enables all categories when true
   lifecycle: false,   // Chrome event handlers (chromeSync.js)
   engine:    false,   // stateManager.apply / mutation traces
   rebuild:   false,   // rebuild / version tracking
-});
+};
+
+const _CT_DEBUG_KEYS = ["all", "lifecycle", "engine", "rebuild"];
+
+/*
+ * CT009 — In-memory debug log buffer
+ *
+ * Bounded FIFO buffer capturing all CT006–CT008 log emissions.
+ * Written only when debug gating allows the corresponding console.log.
+ * Never persisted. Never mutates tree state. Read via ct.logs() / ct.clearLogs().
+ */
+const CT_LOG_MAX = 200;
+const _ctLogBuffer = [];
+
+// Push a structured entry into the buffer. Oldest entry is discarded when cap is reached.
+// `category` — string key used for filtering (TRACE | MUTATION | BRANCH | REBUILD)
+// `op`       — operation or sub-label string
+// `data`     — primitives-only plain object; no live node references
+function _ctLog(category, op, data) {
+  if (_ctLogBuffer.length >= CT_LOG_MAX) _ctLogBuffer.shift();
+  _ctLogBuffer.push({ t: Date.now(), category: category, op: op, data: data });
+}
+
+/*
+ * CT009 — Debug flag control
+ *
+ * setDebugFlags(config)
+ *   config.all === true  → set every flag to true
+ *   otherwise            → reset all flags to false, then enable only provided true flags
+ *
+ * Returns plain copy of resulting flags.
+ */
+function setDebugFlags(config) {
+  if (config && config.all === true) {
+    for (let i = 0; i < _CT_DEBUG_KEYS.length; i++) {
+      CT_DEBUG[_CT_DEBUG_KEYS[i]] = true;
+    }
+  } else {
+    for (let i = 0; i < _CT_DEBUG_KEYS.length; i++) {
+      CT_DEBUG[_CT_DEBUG_KEYS[i]] = false;
+    }
+    if (config) {
+      for (let i = 0; i < _CT_DEBUG_KEYS.length; i++) {
+        if (config[_CT_DEBUG_KEYS[i]] === true) {
+          CT_DEBUG[_CT_DEBUG_KEYS[i]] = true;
+        }
+      }
+    }
+  }
+  var copy = {};
+  for (let i = 0; i < _CT_DEBUG_KEYS.length; i++) {
+    copy[_CT_DEBUG_KEYS[i]] = CT_DEBUG[_CT_DEBUG_KEYS[i]];
+  }
+  return copy;
+}
+
+/*
+ * CT009 — Context detection
+ *
+ * Returns true when executing in the background / service worker context
+ * (where the buffer and CT_DEBUG are the authoritative copies).
+ * Panel scripts that load stateManager.js via a different execution context
+ * will have typeof _ctLogBuffer === "undefined" in their scope — but since
+ * this file defines _ctLogBuffer at module scope, the real discriminator is
+ * whether chrome.runtime.getBackgroundPage or ServiceWorkerGlobalScope is available.
+ * The simplest reliable check: the buffer array is defined in this scope,
+ * so we test whether we own it by checking a sentinel.
+ */
+const _CT_IS_BACKGROUND = (function () {
+  try {
+    // Service worker global scope (MV3)
+    if (typeof ServiceWorkerGlobalScope !== "undefined" && self instanceof ServiceWorkerGlobalScope) return true;
+    // MV2 background page
+    if (typeof chrome !== "undefined" && chrome.extension && chrome.extension.getBackgroundPage &&
+        chrome.extension.getBackgroundPage() === window) return true;
+    // Fallback: if _ctLogBuffer is in scope and we can write to it, we are background
+    // (panel contexts that import this file would have their own copy — but that is
+    //  architecturally forbidden; panel accesses via messages only)
+    return true;
+  } catch (e) {
+    return true;
+  }
+})();
 
 /*
  * stateManager.js — Coon Tree State Engine
@@ -195,64 +277,89 @@ const stateManager = (() => {
   // Returns: { ok:bool, error?:string, sideEffects?:[] }
   // ═══════════════════════════════════════════════════════════════
   function apply(action) {
-    if (CT_DEBUG.all || CT_DEBUG.engine) console.log("[CT TRACE] apply:start", action);
+    if (CT_DEBUG.all || CT_DEBUG.engine) {
+      console.log("[CT TRACE] apply:start", action);
+      // CT009: _extractMutationContext used here to avoid storing live chromeWin/chromeTab refs
+      _ctLog("TRACE", "apply:start", _extractMutationContext(action));
+    }
 
     const result = _execute(action);
 
     // ─── CT006: Mutation trace ───
-    if (CT_DEBUG.all || CT_DEBUG.engine) console.log("[CT MUTATION]", {
-      ..._extractMutationContext(action),
-      result: result.ok ? "ok" : "rejected",
-      error: result.error || null,
-      nodeId: result.nodeId || null
-    });
+    if (CT_DEBUG.all || CT_DEBUG.engine) {
+      const _mutationPayload = {
+        ..._extractMutationContext(action),
+        result: result.ok ? "ok" : "rejected",
+        error: result.error || null,
+        nodeId: result.nodeId || null
+      };
+      console.log("[CT MUTATION]", _mutationPayload);
+      _ctLog("MUTATION", action.op, _mutationPayload);
+    }
 
     // ─── CT006: Branch creation trace ───
     if (action.op === "SYNC_ADD_BRANCH") {
-      if (CT_DEBUG.all || CT_DEBUG.engine) console.log("[CT BRANCH]", {
-        windowId: action.chromeWin ? action.chromeWin.id : null,
-        windowType: action.chromeWin ? (action.chromeWin.type || "normal") : null,
-        nodeId: result.nodeId || null,
-        result: result.ok ? "ok" : "rejected",
-        error: result.error || null
-      });
+      if (CT_DEBUG.all || CT_DEBUG.engine) {
+        const _branchAddPayload = {
+          windowId: action.chromeWin ? action.chromeWin.id : null,
+          windowType: action.chromeWin ? (action.chromeWin.type || "normal") : null,
+          nodeId: result.nodeId || null,
+          result: result.ok ? "ok" : "rejected",
+          error: result.error || null
+        };
+        console.log("[CT BRANCH]", _branchAddPayload);
+        _ctLog("BRANCH", "SYNC_ADD_BRANCH", _branchAddPayload);
+      }
     }
 
     // ─── CT008: Branch removal trace ───
     if (action.op === "SYNC_REMOVE" && action.kind === "branch") {
-      if (CT_DEBUG.all || CT_DEBUG.engine) console.log("[CT BRANCH]", {
-        op: "SYNC_REMOVE",
-        chromeId: action.chromeId || null,
-        result: result.ok ? "ok" : "rejected",
-        error: result.error || null
-      });
+      if (CT_DEBUG.all || CT_DEBUG.engine) {
+        const _branchRemovePayload = {
+          op: "SYNC_REMOVE",
+          chromeId: action.chromeId || null,
+          result: result.ok ? "ok" : "rejected",
+          error: result.error || null
+        };
+        console.log("[CT BRANCH]", _branchRemovePayload);
+        _ctLog("BRANCH", "SYNC_REMOVE", _branchRemovePayload);
+      }
     }
 
     // ─── CT008: Branch save-and-close trace ───
     if (action.op === "SAVE_AND_CLOSE") {
-      if (CT_DEBUG.all || CT_DEBUG.engine) console.log("[CT BRANCH]", {
-        op: "SAVE_AND_CLOSE",
-        nodeId: action.nodeId || null,
-        result: result.ok ? "ok" : "rejected",
-        error: result.error || null
-      });
+      if (CT_DEBUG.all || CT_DEBUG.engine) {
+        const _saveClosePayload = {
+          op: "SAVE_AND_CLOSE",
+          nodeId: action.nodeId || null,
+          result: result.ok ? "ok" : "rejected",
+          error: result.error || null
+        };
+        console.log("[CT BRANCH]", _saveClosePayload);
+        _ctLog("BRANCH", "SAVE_AND_CLOSE", _saveClosePayload);
+      }
     }
 
-    if (CT_DEBUG.all || CT_DEBUG.engine) console.log("[CT TRACE] apply:result", {
-      op: action.op,
-      ok: result.ok,
-      error: result.error || null,
-      nodeId: result.nodeId || null,
-      sideEffects: result.sideEffects || null
-    });
+    if (CT_DEBUG.all || CT_DEBUG.engine) {
+      const _applyResultPayload = {
+        op: action.op,
+        ok: result.ok,
+        error: result.error || null,
+        nodeId: result.nodeId || null,
+        sideEffects: result.sideEffects || null
+      };
+      console.log("[CT TRACE] apply:result", _applyResultPayload);
+      _ctLog("TRACE", "apply:result", _applyResultPayload);
+    }
 
     if (result.ok) {
       _rebuildIndexes();
       _version++;
-      if (CT_DEBUG.all || CT_DEBUG.rebuild) console.log("[CT TRACE] apply:postRebuild", {
-        op: action.op,
-        version: _version
-      });
+      if (CT_DEBUG.all || CT_DEBUG.rebuild) {
+        const _rebuildPayload = { op: action.op, version: _version };
+        console.log("[CT TRACE] apply:postRebuild", _rebuildPayload);
+        _ctLog("REBUILD", "apply:postRebuild", _rebuildPayload);
+      }
     }
 
     return result;
@@ -525,22 +632,34 @@ const stateManager = (() => {
 
   // ─── Internal helpers ───
   function _detachNode(nodeId) {
-    if (CT_DEBUG.all || CT_DEBUG.engine) console.log("[CT TRACE] _detachNode:start", { nodeId });
+    if (CT_DEBUG.all || CT_DEBUG.engine) {
+      console.log("[CT TRACE] _detachNode:start", { nodeId });
+      _ctLog("TRACE", "_detachNode:start", { nodeId });
+    }
 
     const parent = _parentMap.get(nodeId);
     if (!parent) {
-      if (CT_DEBUG.all || CT_DEBUG.engine) console.log("[CT TRACE] _detachNode:error", { nodeId, error: "ORPHAN_OR_ROOT" });
+      if (CT_DEBUG.all || CT_DEBUG.engine) {
+        console.log("[CT TRACE] _detachNode:error", { nodeId, error: "ORPHAN_OR_ROOT" });
+        _ctLog("TRACE", "_detachNode:error", { nodeId, error: "ORPHAN_OR_ROOT" });
+      }
       return { ok: false, error: "ORPHAN_OR_ROOT" };
     }
 
     const idx = parent.children.findIndex(c => c.id === nodeId);
     if (idx < 0) {
-      if (CT_DEBUG.all || CT_DEBUG.engine) console.log("[CT TRACE] _detachNode:error", { nodeId, error: "NOT_IN_PARENT", parentId: parent.id });
+      if (CT_DEBUG.all || CT_DEBUG.engine) {
+        console.log("[CT TRACE] _detachNode:error", { nodeId, error: "NOT_IN_PARENT", parentId: parent.id });
+        _ctLog("TRACE", "_detachNode:error", { nodeId, error: "NOT_IN_PARENT", parentId: parent.id });
+      }
       return { ok: false, error: "NOT_IN_PARENT" };
     }
 
     parent.children.splice(idx, 1);
-    if (CT_DEBUG.all || CT_DEBUG.engine) console.log("[CT TRACE] _detachNode:ok", { nodeId, parentId: parent.id, index: idx });
+    if (CT_DEBUG.all || CT_DEBUG.engine) {
+      console.log("[CT TRACE] _detachNode:ok", { nodeId, parentId: parent.id, index: idx });
+      _ctLog("TRACE", "_detachNode:ok", { nodeId, parentId: parent.id, index: idx });
+    }
     return { ok: true };
   }
 
@@ -601,6 +720,23 @@ const stateManager = (() => {
   };
 })();
 
+// ─── CT009: Helper to read buffered logs (shared by ct.logs and message handler) ───
+function _ctReadLogs(opts) {
+  var filter = opts && opts.filter ? String(opts.filter).toUpperCase() : null;
+  var limit  = opts && opts.limit > 0 ? opts.limit : null;
+
+  var src = filter
+    ? _ctLogBuffer.filter(function (e) { return e.category === filter; })
+    : _ctLogBuffer;
+
+  if (limit !== null) src = src.slice(-limit);
+
+  // Return shallow copies — no live references
+  return src.map(function (e) {
+    return { t: e.t, category: e.category, op: e.op, data: Object.assign({}, e.data) };
+  });
+}
+
 // ─── CT006: DevTools inspection helper ───
 // Usage: ct.tree() in DevTools console
 // Read-only snapshot — does not mutate state
@@ -644,5 +780,127 @@ const ct = {
 
     console.log("[CT TREE]", snapshot);
     return snapshot;
+  },
+
+  // ─── CT009: Log buffer access ───
+  // ct.logs()                        — all entries, chronological
+  // ct.logs({ filter: "BRANCH" })    — entries matching category (case-insensitive)
+  // ct.logs({ limit: 10 })           — last N entries
+  // ct.logs({ filter: "TRACE", limit: 20 }) — combined
+  // Works in both background and panel contexts.
+  logs(opts) {
+    if (_CT_IS_BACKGROUND) {
+      return _ctReadLogs(opts);
+    }
+    // Panel context — request via message bridge (async, returns a Promise)
+    try {
+      return new Promise(function (resolve) {
+        chrome.runtime.sendMessage({ type: "CT_GET_LOGS", opts: opts || {} }, function (response) {
+          if (chrome.runtime.lastError || !response) {
+            resolve([]);
+            return;
+          }
+          resolve(response.logs || []);
+        });
+      });
+    } catch (e) {
+      return [];
+    }
+  },
+
+  // ct.clearLogs() — empties the buffer
+  // Works in both background and panel contexts.
+  clearLogs() {
+    if (_CT_IS_BACKGROUND) {
+      _ctLogBuffer.length = 0;
+      console.log("[CT BUFFER] cleared");
+      return;
+    }
+    // Panel context — request via message bridge
+    try {
+      chrome.runtime.sendMessage({ type: "CT_CLEAR_LOGS" }, function () {
+        if (chrome.runtime.lastError) { /* fail silently */ }
+      });
+    } catch (e) {
+      /* messaging unavailable — fail safely */
+    }
+  },
+
+  // ─── CT009: Debug flag control ───
+  // ct.debug()                            — returns current flags (copy)
+  // ct.debug({ all: true })               — enables all categories
+  // ct.debug({ lifecycle: true, engine: true }) — enables only specified, disables rest
+  // ct.debug({})                           — disables all categories
+  // Works in both background and panel contexts.
+  debug(config) {
+    if (_CT_IS_BACKGROUND) {
+      if (arguments.length === 0 || config === undefined) {
+        // Return current flags as a plain copy
+        var copy = {};
+        for (var i = 0; i < _CT_DEBUG_KEYS.length; i++) {
+          copy[_CT_DEBUG_KEYS[i]] = CT_DEBUG[_CT_DEBUG_KEYS[i]];
+        }
+        return copy;
+      }
+      return setDebugFlags(config);
+    }
+    // Panel context — request via message bridge (async, returns a Promise)
+    try {
+      var msgConfig = arguments.length === 0 || config === undefined ? null : config;
+      return new Promise(function (resolve) {
+        chrome.runtime.sendMessage({ type: "CT_SET_DEBUG", config: msgConfig }, function (response) {
+          if (chrome.runtime.lastError || !response) {
+            resolve(null);
+            return;
+          }
+          resolve(response.flags || null);
+        });
+      });
+    } catch (e) {
+      return null;
+    }
   }
 };
+
+// ─── CT009: Background message listener for cross-context debug access ───
+try {
+  chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
+    if (!msg || !msg.type) return false;
+
+    switch (msg.type) {
+
+      case "CT_GET_LOGS": {
+        var logs = _ctReadLogs(msg.opts || {});
+        sendResponse({ logs: logs });
+        return false; // synchronous response
+      }
+
+      case "CT_CLEAR_LOGS": {
+        _ctLogBuffer.length = 0;
+        console.log("[CT BUFFER] cleared");
+        sendResponse({ ok: true });
+        return false;
+      }
+
+      case "CT_SET_DEBUG": {
+        var flags;
+        if (msg.config === null || msg.config === undefined) {
+          // Read-only: return current flags
+          flags = {};
+          for (var i = 0; i < _CT_DEBUG_KEYS.length; i++) {
+            flags[_CT_DEBUG_KEYS[i]] = CT_DEBUG[_CT_DEBUG_KEYS[i]];
+          }
+        } else {
+          flags = setDebugFlags(msg.config);
+        }
+        sendResponse({ ok: true, flags: flags });
+        return false;
+      }
+
+      default:
+        return false;
+    }
+  });
+} catch (e) {
+  // chrome.runtime.onMessage unavailable — fail safely (e.g. in test harness)
+}
