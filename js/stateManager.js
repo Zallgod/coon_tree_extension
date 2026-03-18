@@ -557,6 +557,24 @@ const stateManager = (() => {
         return _detachNode(node.id);
       }
 
+      // ─── CT017: Window-close tab removal — unbind only, no structural detach ───
+      // During full window shutdown, tabs.onRemoved fires before windows.onRemoved.
+      // This op unbinds runtime identity and transitions tab to "kept" state,
+      // but preserves the node structurally in its parent branch.
+      // SYNC_DETACH_BRANCH (fired later) will then:
+      //   - meaningful branch: keep branch + tabs (tabs already "kept", idempotent)
+      //   - throwaway branch: _detachNode removes branch and all children together
+      case "SYNC_SHUTDOWN_REMOVE_TAB": {
+        const { chromeTabId } = action;
+        const node = findByChrome("tab", chromeTabId);
+        if (!node) return { ok: false, error: "NOT_FOUND" };
+        // CT017: Unbind runtime identity — node stays in tree for branch evaluation
+        node.chromeId = null;
+        node.active = false;
+        node.state = "kept";
+        return { ok: true, nodeId: node.id };
+      }
+
       // ─── CHROME SYNC: Tab moved within a window ───
       case "SYNC_TAB_MOVED": {
         const { chromeTabId, toIndex, chromeWindowId } = action;

@@ -184,11 +184,21 @@ const chromeSync = (() => {
       isWindowClosing: removeInfo.isWindowClosing
     });
 
-    const r = stateManager.apply({
-      op: "SYNC_REMOVE",
-      kind: "tab",
-      chromeId: tabId
-    });
+    // CT017: Distinguish standalone tab deletion from window-close cascade.
+    // Chrome provides removeInfo.isWindowClosing — when true, tab removal is
+    // part of a full window shutdown. Use SYNC_SHUTDOWN_REMOVE_TAB to unbind
+    // runtime identity without structural deletion, so SYNC_DETACH_BRANCH
+    // can later evaluate the branch with its tab nodes still intact.
+    const r = removeInfo.isWindowClosing
+      ? stateManager.apply({
+          op: "SYNC_SHUTDOWN_REMOVE_TAB",
+          chromeTabId: tabId
+        })
+      : stateManager.apply({
+          op: "SYNC_REMOVE",
+          kind: "tab",
+          chromeId: tabId
+        });
 
     if (r.ok) _notify();
   }
