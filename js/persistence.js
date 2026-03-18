@@ -20,16 +20,29 @@
  * Legacy format (auto-migrated on load):
  *   ct_data: { ent:{id→flat_node}, ord:{id→[childIds]}, root:id, ver:number }
  *
- * Crash recovery via Write-Ahead Log:
- *   ct_wal: { intent:"MUTATING", timestamp:ms }
- *   If ct_wal exists on load, we know a crash occurred mid-mutation.
- *   The stored ct_data is the last known-good state (written before mutation started).
+ * CT018 — Last-Known-Good Backup & Recovery Hardening
+ *
+ *   ct_data_lkg: Same workspace envelope format as ct_data.
+ *     Holds the previous successfully-persisted state, rotated from ct_data
+ *     inside saveNow() before each primary overwrite. Not a second canonical
+ *     save path — it is a subordinate step within the single sanctioned pipeline.
+ *
+ *   ct_wal: { intent:"SAVING"|"MUTATING", ver:number, ts:ms }
+ *     WAL written before primary ct_data write, cleared after write completes.
+ *     On load: WAL presence signals a possible interrupted save. load() validates
+ *     primary ct_data; if invalid, falls back to ct_data_lkg. If both fail,
+ *     falls through to the default empty tree.
+ *
+ *   _validatePayload(data): Pre-deserialization structural check on the serialized
+ *     workspace envelope. Separate from CT015 (which validates the deserialized
+ *     live tree post-mutation inside stateManager.apply).
  *
  * Undo is stored as an in-memory stack of normalized tree snapshots (not workspace).
  */
 
 const persistence = (() => {
   const STORAGE_KEY = "ct_data";
+  const BACKUP_KEY = "ct_data_lkg";   // CT018: Last-known-good backup slot
   const WAL_KEY = "ct_wal";
   const SETTINGS_KEY = "ct_settings";
   const MAX_UNDO = 40;
@@ -38,6 +51,7 @@ const persistence = (() => {
   let _saveTimer = null;
   let _undoStack = [];
   let _lastSavedVersion = -1;
+  let _lastSavedData = null;          // CT018: Cached previous save payload for LKG rotation
   let _settingsCache = {};
 
   // ─── Serialize tree to normalized format ───
@@ -109,17 +123,76 @@ const persistence = (() => {
     return data;
   }
 
+  // ─── CT018: Pre-deserialization structural validator ───
+  // Lightweight check on the serialized workspace envelope BEFORE deserialization.
+  // Separate from CT015 (_validateCanonicalTree in stateManager), which validates
+  // the deserialized live tree post-mutation inside apply(REPLACE_TREE).
+  // Returns true if the payload has valid envelope structure; false otherwise.
+  function _validatePayload(data) {
+    try {
+      if (!data || typeof data !== "object") return false;
+      if (!data.workspace || typeof data.workspace !== "object") return false;
+      const tree = data.workspace.tree;
+      if (!tree || typeof tree !== "object") return false;
+      if (!tree.ent || typeof tree.ent !== "object") return false;
+      if (typeof tree.root !== "string" || !tree.root) return false;
+      // root must reference an existing entity
+      if (!tree.ent[tree.root]) return false;
+      // ent must have at least one entry (the root)
+      if (Object.keys(tree.ent).length === 0) return false;
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // ─── CT018: Attempt to restore workspace from a validated payload ───
+  // Shared by primary and LKG load paths. Returns true on success, false on failure.
+  // Uses the same sanctioned replaceWorkspace entrypoint as existing load logic.
+  function _tryRestorePayload(data) {
+    try {
+      if (data.workspace && data.workspace.tree) {
+        const tree = deserialize(data.workspace.tree);
+        const ws = {
+          id: data.workspace.id || "ws1",
+          createdAt: data.workspace.createdAt || Date.now(),
+          updatedAt: data.workspace.updatedAt || Date.now(),
+          tree: tree,
+          meta: data.workspace.meta || {}
+        };
+        stateManager.replaceWorkspace(ws);
+        return true;
+      }
+      return false;
+    } catch (e) {
+      console.error("[persistence] CT018: _tryRestorePayload failed:", e);
+      return false;
+    }
+  }
+
   // ─── Load from storage ───
+  // CT018: Reads primary (ct_data), backup (ct_data_lkg), and WAL.
+  // Validates primary before use. Falls back to LKG if primary is invalid
+  // or if WAL indicates an interrupted save and primary fails validation.
+  // If both fail, falls through to default empty tree (stateManager init state).
   async function load() {
     return new Promise(resolve => {
-      chrome.storage.local.get([STORAGE_KEY, WAL_KEY, SETTINGS_KEY], result => {
-        if (result[WAL_KEY]) {
-          console.warn("[persistence] WAL detected — previous session may have crashed mid-mutation. Using last saved state.");
+      chrome.storage.local.get([STORAGE_KEY, BACKUP_KEY, WAL_KEY, SETTINGS_KEY], result => {
+        const walPresent = !!result[WAL_KEY];
+        if (walPresent) {
+          console.warn("[persistence] CT018: WAL detected — previous session may have crashed mid-save. Validating primary data.");
+        }
+
+        // CT018: Always clear WAL after reading — recovery decision is made below
+        if (walPresent) {
           chrome.storage.local.remove(WAL_KEY);
         }
 
         _settingsCache = result[SETTINGS_KEY] || {};
 
+        let loaded = false;
+
+        // ─── Attempt primary ct_data ───
         if (result[STORAGE_KEY]) {
           try {
             const raw =
@@ -130,23 +203,64 @@ const persistence = (() => {
             // CT010: Detect format and migrate if legacy
             const data = _migrateIfLegacy(raw);
 
-            if (data.workspace && data.workspace.tree) {
-              // New workspace format
-              const tree = deserialize(data.workspace.tree);
-              const ws = {
-                id: data.workspace.id || "ws1",
-                createdAt: data.workspace.createdAt || Date.now(),
-                updatedAt: data.workspace.updatedAt || Date.now(),
-                tree: tree,
-                meta: data.workspace.meta || {}
-              };
-              stateManager.replaceWorkspace(ws);
-              // CT016: forceReindex() removed — replaceWorkspace → replaceTree → apply(REPLACE_TREE)
-              // already rebuilds indexes on success via _rebuildIndexes() inside apply().
-              console.log("[persistence] Loaded workspace with", Object.keys(data.workspace.tree.ent || {}).length, "nodes");
+            // CT018: Validate payload structure before deserializing
+            if (_validatePayload(data)) {
+              if (_tryRestorePayload(data)) {
+                // CT016: forceReindex() removed — replaceWorkspace → replaceTree → apply(REPLACE_TREE)
+                // already rebuilds indexes on success via _rebuildIndexes() inside apply().
+                console.log("[persistence] Loaded workspace with", Object.keys(data.workspace.tree.ent || {}).length, "nodes");
+                loaded = true;
+              } else {
+                console.warn("[persistence] CT018: Primary ct_data deserialized but replaceWorkspace rejected it.");
+              }
             } else {
-              // CT016: Fallback — wrap raw tree into workspace envelope and use
-              // the same sanctioned replaceWorkspace entrypoint as the primary path.
+              console.warn("[persistence] CT018: Primary ct_data failed structural validation.");
+            }
+          } catch (e) {
+            console.error("[persistence] CT018: Failed to parse primary ct_data:", e);
+          }
+        }
+
+        // ─── CT018: Attempt LKG fallback if primary failed ───
+        if (!loaded && result[BACKUP_KEY]) {
+          console.warn("[persistence] CT018: Attempting last-known-good backup (ct_data_lkg).");
+          try {
+            const rawLkg =
+              typeof result[BACKUP_KEY] === "string"
+                ? JSON.parse(result[BACKUP_KEY])
+                : result[BACKUP_KEY];
+
+            const lkgData = _migrateIfLegacy(rawLkg);
+
+            if (_validatePayload(lkgData)) {
+              if (_tryRestorePayload(lkgData)) {
+                console.log("[persistence] CT018: Restored from last-known-good backup with",
+                  Object.keys(lkgData.workspace.tree.ent || {}).length, "nodes");
+                loaded = true;
+              } else {
+                console.error("[persistence] CT018: LKG backup deserialized but replaceWorkspace rejected it.");
+              }
+            } else {
+              console.error("[persistence] CT018: LKG backup also failed structural validation.");
+            }
+          } catch (e) {
+            console.error("[persistence] CT018: Failed to parse LKG backup:", e);
+          }
+        }
+
+        // ─── CT016: Legacy raw-tree fallback (no workspace envelope) ───
+        // Only reached if primary had data but wasn't a valid workspace envelope,
+        // and no LKG was available. Preserves pre-CT018 behavior for edge cases.
+        if (!loaded && result[STORAGE_KEY]) {
+          try {
+            const raw =
+              typeof result[STORAGE_KEY] === "string"
+                ? JSON.parse(result[STORAGE_KEY])
+                : result[STORAGE_KEY];
+
+            // Only attempt this path if the data has some tree-like shape
+            // but did not pass workspace validation (e.g., very old format)
+            if (raw && (raw.children || raw.id)) {
               const tree = deserialize(raw);
               const now = Date.now();
               stateManager.replaceWorkspace({
@@ -156,11 +270,16 @@ const persistence = (() => {
                 tree: tree,
                 meta: {}
               });
-              console.log("[persistence] Loaded tree (fallback, wrapped) with unknown node count");
+              console.log("[persistence] Loaded tree (legacy fallback, wrapped) with unknown node count");
+              loaded = true;
             }
           } catch (e) {
-            console.error("[persistence] Failed to load tree:", e);
+            console.error("[persistence] CT018: Legacy fallback also failed:", e);
           }
+        }
+
+        if (!loaded && (result[STORAGE_KEY] || result[BACKUP_KEY])) {
+          console.error("[persistence] CT018: All recovery paths exhausted. Starting with default empty tree.");
         }
 
         resolve();
@@ -181,6 +300,8 @@ const persistence = (() => {
   // All persisted workspace/tree writes to chrome.storage.local flow through here.
   // Data is sourced exclusively from stateManager canonical state.
   // No other function may write canonical workspace/tree data to storage.
+  // CT018: LKG rotation and WAL bracketing are subordinate steps within this
+  // single pipeline — not a second canonical save path.
   function saveNow() {
     const ver = stateManager.getVersion();
     if (ver === _lastSavedVersion) return;
@@ -197,14 +318,36 @@ const persistence = (() => {
       },
       ver: ver
     };
-    chrome.storage.local.set({ [STORAGE_KEY]: data });
+
+    // CT018: Write WAL before primary write — signals save-in-progress
+    chrome.storage.local.set({
+      [WAL_KEY]: { intent: "SAVING", ver: ver, ts: Date.now() }
+    });
+
+    // CT018: Rotate previous saved payload to LKG backup slot.
+    // _lastSavedData is populated from saveNow() itself after each successful write.
+    // On first save of the session (_lastSavedData is null), skip rotation.
+    if (_lastSavedData !== null) {
+      chrome.storage.local.set({ [BACKUP_KEY]: _lastSavedData });
+    }
+
+    // Primary write
+    chrome.storage.local.set({ [STORAGE_KEY]: data }, () => {
+      // CT018: Clear WAL after primary write completes
+      chrome.storage.local.remove(WAL_KEY);
+    });
+
+    // CT018: Cache this payload for next rotation
+    _lastSavedData = data;
     _lastSavedVersion = ver;
   }
 
   // ─── WAL ───
+  // CT018: External writeWAL() retains "MUTATING" intent for callers outside saveNow().
+  // saveNow() writes its own WAL with intent "SAVING" directly (see above).
   function writeWAL() {
     chrome.storage.local.set({
-      [WAL_KEY]: { intent: "MUTATING", ts: Date.now() }
+      [WAL_KEY]: { intent: "MUTATING", ver: stateManager.getVersion(), ts: Date.now() }
     });
   }
 
