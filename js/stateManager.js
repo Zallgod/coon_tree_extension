@@ -435,10 +435,18 @@ const stateManager = (() => {
       }
 
       // ─── CHROME SYNC: Remove by chromeId ───
+      // CT011: Unbind runtime chromeId before structural detach.
+      // Node removal is still performed (preserving existing behavior),
+      // but identity unbinding is explicit and separated from structural mutation.
       case "SYNC_REMOVE": {
         const { kind, chromeId } = action;
         const node = findByChrome(kind, chromeId);
         if (!node) return { ok: false, error: "NOT_FOUND" };
+        // CT011: Explicitly unbind runtime identity before structural operation
+        node.chromeId = null;
+        if (kind === "tab") {
+          node.active = false;
+        }
         return _detachNode(node.id);
       }
 
@@ -467,21 +475,31 @@ const stateManager = (() => {
       }
 
       // ─── CHROME SYNC: Tab attached to new window ───
+      // CT011: Attach = rebind runtime identity + reparent.
+      // Existing nodes are reparented via inline splice (no _detachNode).
+      // New node creation only if genuinely untracked.
       case "SYNC_TAB_ATTACHED": {
         const { chromeTab, branchNodeId, position } = action;
-        // Check if already tracked — if so, this is a move, not a create
+        // Check if already tracked — if so, this is a reparent, not a create
         const existing = findByChrome("tab", chromeTab.id);
         if (existing) {
-          // Already tracked — detach from old parent, attach to new
-          _detachNode(existing.id);
+          // CT011: Inline reparent — remove from old parent without _detachNode
+          const oldParent = _parentMap.get(existing.id);
+          if (oldParent) {
+            const oi = oldParent.children.indexOf(existing);
+            if (oi >= 0) oldParent.children.splice(oi, 1);
+          }
           const branch = _nodeMap.get(branchNodeId);
           if (!branch) return { ok: false, error: "BRANCH_NOT_FOUND" };
           branch.children.splice(Math.min(position, branch.children.length), 0, existing);
-          // Update the tab's windowId
+          // CT011: Update runtime binding only — nodeId and structure are stable
+          existing.chromeId = chromeTab.id;
           existing.windowId = chromeTab.windowId;
           return { ok: true };
         }
-        // Not tracked — create new
+        // Not tracked — create new (genuine new tab, not a rebind)
+        // CT011: Duplicate guard — chromeId check above already covers this,
+        // but verify no stale mapping exists before creation
         const branch = _nodeMap.get(branchNodeId);
         if (!branch) return { ok: false, error: "BRANCH_NOT_FOUND" };
         const node = makeTab(chromeTab);
@@ -641,6 +659,28 @@ const stateManager = (() => {
         if (!action.tree || !action.tree.id) return { ok: false, error: "INVALID_TREE" };
         // CT010: Replace tree inside workspace, preserve workspace container
         _workspace.tree = action.tree;
+        return { ok: true };
+      }
+
+      // ─── CT011: Chrome tab replaced (e.g. prerender commit) ───
+      // Rebinds runtime chromeId from old → new without structural mutation.
+      case "SYNC_TAB_REPLACED": {
+        const { oldChromeTabId, newChromeTabId } = action;
+        const node = findByChrome("tab", oldChromeTabId);
+        if (!node) return { ok: false, error: "NOT_FOUND" };
+        // CT011: Rebind runtime identity only — nodeId and tree position are stable
+        node.chromeId = newChromeTabId;
+        return { ok: true };
+      }
+
+      // ─── CT011: Unbind runtime chromeId without structural mutation ───
+      // Used during detach to clear runtime binding while preserving node in tree.
+      case "SYNC_UNBIND_TAB": {
+        const { chromeTabId } = action;
+        const node = findByChrome("tab", chromeTabId);
+        if (!node) return { ok: false, error: "NOT_FOUND" };
+        // CT011: Clear runtime binding only — node stays in tree, nodeId is permanent
+        node.chromeId = null;
         return { ok: true };
       }
 

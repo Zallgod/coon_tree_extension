@@ -247,6 +247,11 @@ const chromeSync = (() => {
       oldPosition: detachInfo.oldPosition
     });
 
+    // CT011: Detach = no structural mutation, no chromeId unbinding.
+    // The tab's chromeId remains valid throughout the detach → attach sequence.
+    // Node stays in tree at current position; onTabAttached will reparent it.
+    // This enforces: detach never creates, deletes, or unbinds nodes.
+
     if (CT_DEBUG.all || CT_DEBUG.lifecycle) console.log("[CT TRACE] onTabDetached", {
       tabId,
       detachInfo
@@ -399,7 +404,22 @@ const chromeSync = (() => {
     chrome.tabs.onAttached.addListener(onTabAttached);
     chrome.tabs.onDetached.addListener(onTabDetached);
     chrome.tabs.onActivated.addListener(onTabActivated);
-    chrome.tabs.onReplaced.addListener(() => {});
+    // CT011: Tab replaced (e.g. prerender → committed) — rebind runtime chromeId
+    chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
+
+      if (CT_DEBUG.all || CT_DEBUG.lifecycle) console.log("[CT EVENT] tabs.onReplaced", {
+        addedTabId,
+        removedTabId
+      });
+
+      const r = stateManager.apply({
+        op: "SYNC_TAB_REPLACED",
+        oldChromeTabId: removedTabId,
+        newChromeTabId: addedTabId
+      });
+
+      if (r.ok) _notify();
+    });
 
     chrome.windows.onCreated.addListener(onWinCreated);
     chrome.windows.onRemoved.addListener(onWinRemoved);
