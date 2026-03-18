@@ -141,14 +141,22 @@ const persistence = (() => {
                 meta: data.workspace.meta || {}
               };
               stateManager.replaceWorkspace(ws);
-              stateManager.forceReindex();
+              // CT016: forceReindex() removed — replaceWorkspace → replaceTree → apply(REPLACE_TREE)
+              // already rebuilds indexes on success via _rebuildIndexes() inside apply().
               console.log("[persistence] Loaded workspace with", Object.keys(data.workspace.tree.ent || {}).length, "nodes");
             } else {
-              // Fallback: try direct deserialize (should not happen after migration)
+              // CT016: Fallback — wrap raw tree into workspace envelope and use
+              // the same sanctioned replaceWorkspace entrypoint as the primary path.
               const tree = deserialize(raw);
-              stateManager.replaceTree(tree);
-              stateManager.forceReindex();
-              console.log("[persistence] Loaded tree (fallback) with unknown node count");
+              const now = Date.now();
+              stateManager.replaceWorkspace({
+                id: "ws1",
+                createdAt: now,
+                updatedAt: now,
+                tree: tree,
+                meta: {}
+              });
+              console.log("[persistence] Loaded tree (fallback, wrapped) with unknown node count");
             }
           } catch (e) {
             console.error("[persistence] Failed to load tree:", e);
@@ -169,6 +177,10 @@ const persistence = (() => {
     }, SAVE_DEBOUNCE_MS);
   }
 
+  // ─── CT016: saveNow() is THE single sanctioned canonical save entry ───
+  // All persisted workspace/tree writes to chrome.storage.local flow through here.
+  // Data is sourced exclusively from stateManager canonical state.
+  // No other function may write canonical workspace/tree data to storage.
   function saveNow() {
     const ver = stateManager.getVersion();
     if (ver === _lastSavedVersion) return;
@@ -213,7 +225,8 @@ const persistence = (() => {
     const snapshot = _undoStack.pop();
     const tree = deserialize(snapshot);
     stateManager.replaceTree(tree);
-    stateManager.forceReindex();
+    // CT016: forceReindex() removed — replaceTree → apply(REPLACE_TREE)
+    // already rebuilds indexes on success via _rebuildIndexes() inside apply().
     return true;
   }
 
