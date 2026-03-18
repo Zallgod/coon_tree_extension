@@ -158,6 +158,58 @@ const stateManager = (() => {
     }
   }
 
+  // ─── CT015: Canonical tree validator ───
+  // Enforces whole-tree structural integrity after mutation.
+  // Returns { valid: true } or { valid: false, reason: string }.
+  // Checks: duplicate nodeIds, missing ids, children array integrity,
+  // multi-parent violations, and cycle detection.
+  function _validateCanonicalTree() {
+    const root = _workspace.tree;
+    if (!root || !root.id) return { valid: false, reason: "NO_ROOT" };
+
+    const seenIds = new Set();
+    const parentTracker = new Map(); // nodeId → parentId (to detect multi-parent)
+    const stk = [{ node: root, parentId: null, ancestors: new Set() }];
+
+    while (stk.length) {
+      const { node, parentId, ancestors } = stk.pop();
+
+      // Every node must have an id
+      if (!node.id) return { valid: false, reason: "MISSING_ID" };
+
+      // Duplicate nodeId is a hard failure
+      if (seenIds.has(node.id)) return { valid: false, reason: "DUPLICATE_NODE: " + node.id };
+      seenIds.add(node.id);
+
+      // Cycle detection: node id must not appear in its own ancestor chain
+      if (ancestors.has(node.id)) return { valid: false, reason: "CYCLE: " + node.id };
+
+      // Multi-parent detection: each non-root node must have exactly one parent
+      if (parentId !== null) {
+        if (parentTracker.has(node.id)) {
+          return { valid: false, reason: "MULTI_PARENT: " + node.id };
+        }
+        parentTracker.set(node.id, parentId);
+      }
+
+      // Children array integrity
+      if (node.children) {
+        if (!Array.isArray(node.children)) {
+          return { valid: false, reason: "INVALID_CHILDREN: " + node.id };
+        }
+        const childAncestors = new Set(ancestors);
+        childAncestors.add(node.id);
+        for (let i = node.children.length - 1; i >= 0; i--) {
+          const child = node.children[i];
+          if (!child) return { valid: false, reason: "NULL_CHILD: " + node.id };
+          stk.push({ node: child, parentId: node.id, ancestors: childAncestors });
+        }
+      }
+    }
+
+    return { valid: true };
+  }
+
   // ─── ID generation ───
   function newId() { return "ct" + (_seq++); }
 
@@ -300,6 +352,9 @@ const stateManager = (() => {
       _ctLog("TRACE", "apply:start", _extractMutationContext(action));
     }
 
+    // CT015: Capture deep-clone rollback snapshot before mutation
+    const _ct15_snapshot = JSON.parse(JSON.stringify(_workspace.tree));
+
     const result = _execute(action);
 
     // ─── CT006: Mutation trace ───
@@ -385,6 +440,24 @@ const stateManager = (() => {
     }
 
     if (result.ok) {
+      // CT015: Mandatory post-mutation canonical tree validation
+      const _ct15_validation = _validateCanonicalTree();
+      if (!_ct15_validation.valid) {
+        // CT015: Validation failed — rollback to pre-mutation snapshot
+        _workspace.tree = _ct15_snapshot;
+        _rebuildIndexes();
+        // Do NOT bump _version or update _workspace.updatedAt
+        if (CT_DEBUG.all || CT_DEBUG.engine) {
+          const _rollbackPayload = {
+            op: action.op,
+            reason: _ct15_validation.reason
+          };
+          console.log("[CT TRACE] apply:ct15_rollback", _rollbackPayload);
+          _ctLog("TRACE", "apply:ct15_rollback", _rollbackPayload);
+        }
+        // Return rejection — no sideEffects, no success signals
+        return { ok: false, error: "VALIDATION_FAILED: " + _ct15_validation.reason };
+      }
       _rebuildIndexes();
       _version++;
       // CT010: Update workspace timestamp on successful mutation
