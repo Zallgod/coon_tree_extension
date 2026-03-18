@@ -249,7 +249,8 @@ const stateManager = (() => {
     return {
       id: newId(), kind: "branch", state: "live", chromeId: chromeWin.id,
       title: "", customTitle: "", focused: chromeWin.focused,
-      windowType: chromeWin.type || "normal", children: [], collapsed: false
+      windowType: chromeWin.type || "normal", children: [], collapsed: false,
+      hadMeaningfulTab: false
     };
   }
 
@@ -434,6 +435,15 @@ const stateManager = (() => {
           } else { pos = i + 1; }
         }
         parent.children.splice(pos, 0, node);
+        // CT014: Persist meaningful-tab signal on the branch at add time,
+        // so classification at SYNC_DETACH_BRANCH is not dependent on live subtree.
+        if (isMeaningfulUrl(chromeTab.url)) {
+          let anc = _nodeMap.get(parentNodeId);
+          while (anc) {
+            if (anc.kind === "branch") { anc.hadMeaningfulTab = true; break; }
+            anc = _parentMap.get(anc.id);
+          }
+        }
         return { ok: true, nodeId: node.id };
       }
 
@@ -445,6 +455,15 @@ const stateManager = (() => {
         let changed = false;
         for (const k of ["title", "url", "favIconUrl", "pinned", "active"]) {
           if (changes[k] !== undefined && node[k] !== changes[k]) { node[k] = changes[k]; changed = true; }
+        }
+        // CT014: If url changed to a meaningful URL, record signal on branch ancestor.
+        // Uses node.url (already updated above) so we do not need to re-read changes.url.
+        if (changes.url !== undefined && isMeaningfulUrl(node.url)) {
+          let anc = _parentMap.get(nodeId);
+          while (anc) {
+            if (anc.kind === "branch") { anc.hadMeaningfulTab = true; break; }
+            anc = _parentMap.get(anc.id);
+          }
         }
         return { ok: changed };
       }
@@ -746,13 +765,20 @@ const stateManager = (() => {
 
   // ─── CT013: Branch persistence policy helpers ───
 
+  // CT014: Returns true when url is non-empty and is not a chrome://newtab URL.
+  // Used as the single source of truth for meaningful-URL classification.
+  function isMeaningfulUrl(url) {
+    return !!url && url !== "chrome://newtab/" && !url.startsWith("chrome://newtab?");
+  }
+
   // Returns true if the branch node has at least one tab with a meaningful URL.
-  // A meaningful URL is any non-empty URL that is not chrome://newtab/.
+  // CT014: Retained for reference; no longer called by isBranchMeaningful.
+  // Classification now relies on the persistent hadMeaningfulTab flag instead.
   function hasMeaningfulTabs(node) {
     const stk = [node];
     while (stk.length) {
       const cur = stk.pop();
-      if (cur.kind === "tab" && cur.url && cur.url !== "chrome://newtab/") return true;
+      if (cur.kind === "tab" && isMeaningfulUrl(cur.url)) return true;
       if (cur.children) for (let i = cur.children.length - 1; i >= 0; i--) stk.push(cur.children[i]);
     }
     return false;
@@ -768,13 +794,13 @@ const stateManager = (() => {
   // Meaningful if ANY of the following are true:
   //   - renamed from default (customTitle is non-empty)
   //   - moved under a non-root parent
-  //   - contains at least one non-chrome://newtab tab
+  //   - CT014: hadMeaningfulTab was set true during the branch's lifetime
   //   - has metadata (placeholder false for now)
   function isBranchMeaningful(node) {
     if (node.customTitle) return true;
     const parent = _parentMap.get(node.id);
     if (parent && parent.id !== _workspace.tree.id) return true;
-    if (hasMeaningfulTabs(node)) return true;
+    if (node.hadMeaningfulTab === true) return true;
     if (hasMetadata(node)) return true;
     return false;
   }
