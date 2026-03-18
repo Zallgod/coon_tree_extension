@@ -356,6 +356,21 @@ const stateManager = (() => {
       }
     }
 
+    // ─── CT013: Branch detach policy trace ───
+    if (action.op === "SYNC_DETACH_BRANCH") {
+      if (CT_DEBUG.all || CT_DEBUG.engine) {
+        const _detachBranchPayload = {
+          op: "SYNC_DETACH_BRANCH",
+          chromeWindowId: action.chromeWindowId || null,
+          nodeId: result.nodeId || null,
+          result: result._branchResult || null,
+          ok: result.ok
+        };
+        console.log("[CT BRANCH]", _detachBranchPayload);
+        _ctLog("BRANCH", "SYNC_DETACH_BRANCH", _detachBranchPayload);
+      }
+    }
+
     if (CT_DEBUG.all || CT_DEBUG.engine) {
       const _applyResultPayload = {
         op: action.op,
@@ -684,31 +699,42 @@ const stateManager = (() => {
         return { ok: true };
       }
 
-      // ─── CT012: Detach branch from Chrome window lifecycle ───
-      // Unbinds runtime chromeId and clears live state on branch and child tabs.
-      // Branch node remains in tree — no structural mutation.
+      // ─── CT012/CT013: Detach branch from Chrome window lifecycle ───
+      // CT013: Evaluates branch before detaching. Meaningful branches are kept
+      // (existing detach behavior). Unmodified/throwaway branches are discarded
+      // via _detachNode — no kept state written, node removed from tree entirely.
       case "SYNC_DETACH_BRANCH": {
         const { chromeWindowId } = action;
         const node = findByChrome("branch", chromeWindowId);
         if (!node) return { ok: false, error: "NOT_FOUND" };
-        // CT012: Unbind runtime association only — node identity and tree position are stable
-        node.chromeId = null;
-        node.focused = false;
-        node.state = "kept";
-        node.savedDate = Date.now();
-        if (!node.customTitle) node.customTitle = _pstDate();
-        // CT012: Unbind all live child tabs — they no longer have runtime counterparts
-        const stk = [node];
-        while (stk.length) {
-          const cur = stk.pop();
-          if (cur.kind === "tab" && cur.state === "live") {
-            cur.state = "kept";
-            cur.chromeId = null;
-            cur.active = false;
+
+        if (isBranchMeaningful(node)) {
+          // CT013: Meaningful branch — preserve via existing detach behavior (CT012).
+          // Unbind runtime association; node identity and tree position remain stable.
+          node.chromeId = null;
+          node.focused = false;
+          node.state = "kept";
+          node.savedDate = Date.now();
+          if (!node.customTitle) node.customTitle = _pstDate();
+          // Unbind all live child tabs — they no longer have runtime counterparts
+          const stk = [node];
+          while (stk.length) {
+            const cur = stk.pop();
+            if (cur.kind === "tab" && cur.state === "live") {
+              cur.state = "kept";
+              cur.chromeId = null;
+              cur.active = false;
+            }
+            if (cur.children) for (let i = cur.children.length - 1; i >= 0; i--) stk.push(cur.children[i]);
           }
-          if (cur.children) for (let i = cur.children.length - 1; i >= 0; i--) stk.push(cur.children[i]);
+          return { ok: true, nodeId: node.id, _branchResult: "kept" };
+        } else {
+          // CT013: Unmodified/throwaway branch — discard by removing from tree entirely.
+          // Uses the same safe removal path as REMOVE / SYNC_REMOVE.
+          const removeResult = _detachNode(node.id);
+          if (!removeResult.ok) return removeResult;
+          return { ok: true, _branchResult: "discarded" };
         }
-        return { ok: true, nodeId: node.id };
       }
 
       default:
@@ -717,6 +743,42 @@ const stateManager = (() => {
   }
 
   // ─── Internal helpers ───
+
+  // ─── CT013: Branch persistence policy helpers ───
+
+  // Returns true if the branch node has at least one tab with a meaningful URL.
+  // A meaningful URL is any non-empty URL that is not chrome://newtab/.
+  function hasMeaningfulTabs(node) {
+    const stk = [node];
+    while (stk.length) {
+      const cur = stk.pop();
+      if (cur.kind === "tab" && cur.url && cur.url !== "chrome://newtab/") return true;
+      if (cur.children) for (let i = cur.children.length - 1; i >= 0; i--) stk.push(cur.children[i]);
+    }
+    return false;
+  }
+
+  // Returns true if the branch node carries metadata that should be preserved.
+  // Placeholder — always returns false until a metadata schema is defined.
+  function hasMetadata(/* node */) {
+    return false;
+  }
+
+  // Returns true if the branch is meaningful and should be kept on window close.
+  // Meaningful if ANY of the following are true:
+  //   - renamed from default (customTitle is non-empty)
+  //   - moved under a non-root parent
+  //   - contains at least one non-chrome://newtab tab
+  //   - has metadata (placeholder false for now)
+  function isBranchMeaningful(node) {
+    if (node.customTitle) return true;
+    const parent = _parentMap.get(node.id);
+    if (parent && parent.id !== _workspace.tree.id) return true;
+    if (hasMeaningfulTabs(node)) return true;
+    if (hasMetadata(node)) return true;
+    return false;
+  }
+
   function _detachNode(nodeId) {
     if (CT_DEBUG.all || CT_DEBUG.engine) {
       console.log("[CT TRACE] _detachNode:start", { nodeId });
