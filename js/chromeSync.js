@@ -339,10 +339,11 @@ const chromeSync = (() => {
       windowId: winId
     });
 
+    // CT012: Decouple branch lifecycle from window lifecycle.
+    // Window removal detaches runtime association only — branch node persists in tree.
     const r = stateManager.apply({
-      op: "SYNC_REMOVE",
-      kind: "branch",
-      chromeId: winId
+      op: "SYNC_DETACH_BRANCH",
+      chromeWindowId: winId
     });
 
     if (r.ok) _notify();

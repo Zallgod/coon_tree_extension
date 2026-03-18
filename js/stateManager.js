@@ -684,6 +684,33 @@ const stateManager = (() => {
         return { ok: true };
       }
 
+      // ─── CT012: Detach branch from Chrome window lifecycle ───
+      // Unbinds runtime chromeId and clears live state on branch and child tabs.
+      // Branch node remains in tree — no structural mutation.
+      case "SYNC_DETACH_BRANCH": {
+        const { chromeWindowId } = action;
+        const node = findByChrome("branch", chromeWindowId);
+        if (!node) return { ok: false, error: "NOT_FOUND" };
+        // CT012: Unbind runtime association only — node identity and tree position are stable
+        node.chromeId = null;
+        node.focused = false;
+        node.state = "kept";
+        node.savedDate = Date.now();
+        if (!node.customTitle) node.customTitle = _pstDate();
+        // CT012: Unbind all live child tabs — they no longer have runtime counterparts
+        const stk = [node];
+        while (stk.length) {
+          const cur = stk.pop();
+          if (cur.kind === "tab" && cur.state === "live") {
+            cur.state = "kept";
+            cur.chromeId = null;
+            cur.active = false;
+          }
+          if (cur.children) for (let i = cur.children.length - 1; i >= 0; i--) stk.push(cur.children[i]);
+        }
+        return { ok: true, nodeId: node.id };
+      }
+
       default:
         return { ok: false, error: "UNKNOWN_OP: " + action.op };
     }
