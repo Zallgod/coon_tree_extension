@@ -72,14 +72,16 @@ function setDebugFlags(config) {
 /*
  * CT009 — Context detection
  *
- * Returns true when executing in the background / service worker context
- * (where the buffer and CT_DEBUG are the authoritative copies).
- * Panel scripts that load stateManager.js via a different execution context
- * will have typeof _ctLogBuffer === "undefined" in their scope — but since
- * this file defines _ctLogBuffer at module scope, the real discriminator is
- * whether chrome.runtime.getBackgroundPage or ServiceWorkerGlobalScope is available.
- * The simplest reliable check: the buffer array is defined in this scope,
- * so we test whether we own it by checking a sentinel.
+ * Returns true only when executing in the background / service worker context
+ * (where CT_DEBUG and _ctLogBuffer are the authoritative copies).
+ *
+ * Positive cases:
+ *   MV3 — self instanceof ServiceWorkerGlobalScope
+ *   MV2 — chrome.extension.getBackgroundPage() === window
+ *
+ * All other contexts (panel page, DevTools, test harness) return false.
+ * Panel contexts must route CT009 commands through the message bridge;
+ * they must never claim direct ownership of CT_DEBUG or the log buffer.
  */
 const _CT_IS_BACKGROUND = (function () {
   try {
@@ -88,12 +90,15 @@ const _CT_IS_BACKGROUND = (function () {
     // MV2 background page
     if (typeof chrome !== "undefined" && chrome.extension && chrome.extension.getBackgroundPage &&
         chrome.extension.getBackgroundPage() === window) return true;
-    // Fallback: if _ctLogBuffer is in scope and we can write to it, we are background
-    // (panel contexts that import this file would have their own copy — but that is
-    //  architecturally forbidden; panel accesses via messages only)
-    return true;
+    // Neither background condition matched — this is a panel or unknown context.
+    // Panel must route CT009 commands through the message bridge (see ct.logs /
+    // ct.clearLogs / ct.debug panel branches below). Returning false here ensures
+    // panel never claims background authority over CT_DEBUG or the log buffer.
+    return false;
   } catch (e) {
-    return true;
+    // Unknown context (e.g. test harness without chrome) — treat as non-background
+    // so message bridge branches are used and no direct buffer access is attempted.
+    return false;
   }
 })();
 
@@ -1136,6 +1141,14 @@ const ct = {
     }
   }
 };
+
+// ─── CT019: DevTools global exposure ───
+// Assign ct to globalThis so it is reachable from the DevTools console in both
+// the panel page (globalThis === window) and the MV3 service worker background
+// (globalThis === self / ServiceWorkerGlobalScope). This does not introduce a
+// second source of truth: the object is the same ct defined above, and panel
+// callers still route all CT009 commands through the message bridge at runtime.
+globalThis.ct = ct;
 
 // ─── CT009: Background message listener for cross-context debug access ───
 try {
