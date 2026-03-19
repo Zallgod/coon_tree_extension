@@ -307,7 +307,11 @@ const stateManager = (() => {
       id: newId(), kind: "branch", state: "live", chromeId: chromeWin.id,
       title: "", customTitle: "", focused: chromeWin.focused,
       windowType: chromeWin.type || "normal", children: [], collapsed: false,
-      hadMeaningfulTab: false
+      hadMeaningfulTab: false,
+      // CT020: Explicit branch save-eligibility policy fields
+      userModified: false,          // true once any user-initiated action modifies this branch
+      crashSavePolicy: "off",       // "off" | "on" — when "on", non-user-modified branches are kept on close
+      descendantSavePolicy: "none"  // "none" | "inherit" — "inherit" makes descendants save-eligible
     };
   }
 
@@ -722,6 +726,8 @@ const stateManager = (() => {
             sideEffects.push({ type: "CHROME_MOVE_TAB", tabId: src.chromeId, toWin: newWin });
           }
         }
+        // CT020: User-initiated relocation marks affected branch as intentionally modified
+        _markBranchUserModified(sourceId);
         return { ok: true, sideEffects };
       }
 
@@ -736,6 +742,8 @@ const stateManager = (() => {
         if (!parent || !parent.children) return { ok: false, error: "PARENT_NOT_FOUND" };
         if (!action.node || !action.node.id) return { ok: false, error: "INVALID_NODE" };
         parent.children.push(action.node);
+        // CT020: User-initiated append marks affected branch as intentionally modified
+        if (action.parentId) _markBranchUserModified(action.parentId);
         return { ok: true };
       }
 
@@ -746,6 +754,8 @@ const stateManager = (() => {
         const par = _parentMap.get(action.afterId) || _workspace.tree;
         const idx = par.children.indexOf(ref);
         par.children.splice(idx + 1, 0, action.node);
+        // CT020: User-initiated insert marks affected branch as intentionally modified
+        _markBranchUserModified(action.afterId);
         return { ok: true };
       }
 
@@ -754,6 +764,8 @@ const stateManager = (() => {
         const nd = _nodeMap.get(action.nodeId);
         if (!nd) return { ok: false, error: "NODE_NOT_FOUND" };
         Object.assign(nd, action.props);
+        // CT020: User-initiated property edit marks affected branch as intentionally modified
+        _markBranchUserModified(action.nodeId);
         return { ok: true };
       }
 
@@ -814,17 +826,22 @@ const stateManager = (() => {
         return { ok: true };
       }
 
-      // ─── CT012/CT013: Detach branch from Chrome window lifecycle ───
-      // CT013: Evaluates branch before detaching. Meaningful branches are kept
-      // (existing detach behavior). Unmodified/throwaway branches are discarded
-      // via _detachNode — no kept state written, node removed from tree entirely.
+      // ─── CT012/CT013/CT020: Detach branch from Chrome window lifecycle ───
+      // CT020: Evaluates branch using explicit save-eligibility policy.
+      // Save-eligible branches are kept (CT012 detach behavior preserved).
+      // Non-eligible branches with crashSavePolicy "on" are also kept (crash-save).
+      // All other branches are discarded via _detachNode.
       case "SYNC_DETACH_BRANCH": {
         const { chromeWindowId } = action;
         const node = findByChrome("branch", chromeWindowId);
         if (!node) return { ok: false, error: "NOT_FOUND" };
 
-        if (isBranchMeaningful(node)) {
-          // CT013: Meaningful branch — preserve via existing detach behavior (CT012).
+        // CT020: Explicit save-eligibility policy replaces broad meaningful-history check
+        const eligible = isBranchSaveEligible(node);
+        const crashSave = !eligible && node.crashSavePolicy === "on";
+
+        if (eligible || crashSave) {
+          // CT013/CT020: Eligible or crash-save branch — preserve via detach behavior (CT012).
           // Unbind runtime association; node identity and tree position remain stable.
           node.chromeId = null;
           node.focused = false;
@@ -832,6 +849,7 @@ const stateManager = (() => {
           node.savedDate = Date.now();
           if (!node.customTitle) node.customTitle = _pstDate();
           // Unbind all live child tabs — they no longer have runtime counterparts
+          // CT017: Tabs already transitioned by SYNC_SHUTDOWN_REMOVE_TAB are idempotent
           const stk = [node];
           while (stk.length) {
             const cur = stk.pop();
@@ -842,9 +860,9 @@ const stateManager = (() => {
             }
             if (cur.children) for (let i = cur.children.length - 1; i >= 0; i--) stk.push(cur.children[i]);
           }
-          return { ok: true, nodeId: node.id, _branchResult: "kept" };
+          return { ok: true, nodeId: node.id, _branchResult: crashSave ? "kept:crash-save" : "kept" };
         } else {
-          // CT013: Unmodified/throwaway branch — discard by removing from tree entirely.
+          // CT020: Not save-eligible — discard by removing from tree entirely.
           // Uses the same safe removal path as REMOVE / SYNC_REMOVE.
           const removeResult = _detachNode(node.id);
           if (!removeResult.ok) return removeResult;
@@ -859,7 +877,7 @@ const stateManager = (() => {
 
   // ─── Internal helpers ───
 
-  // ─── CT013: Branch persistence policy helpers ───
+  // ─── CT013/CT020: Branch persistence policy helpers ───
 
   // CT014: Returns true when url is non-empty and is not a chrome://newtab URL.
   // Used as the single source of truth for meaningful-URL classification.
@@ -886,7 +904,49 @@ const stateManager = (() => {
     return false;
   }
 
-  // Returns true if the branch is meaningful and should be kept on window close.
+  // CT020: Walk upward from nodeId to the nearest branch ancestor and set
+  // userModified = true. Short-circuits if the branch is already marked.
+  // Safe to call with any nodeId — no-ops if no branch ancestor exists.
+  function _markBranchUserModified(nodeId) {
+    let cur = _nodeMap.get(nodeId);
+    while (cur) {
+      if (cur.kind === "branch") {
+        if (!cur.userModified) cur.userModified = true;
+        return;
+      }
+      cur = _parentMap.get(cur.id);
+    }
+  }
+
+  // CT020: Returns true if the branch is save-eligible under the explicit policy.
+  // Save-eligible if ANY of the following are true:
+  //   - userModified was set true by a user-initiated action
+  //   - renamed from default (customTitle is non-empty)
+  //   - moved under a non-root parent (user organizational intent)
+  //   - an ancestor branch has descendantSavePolicy "inherit" and is itself save-eligible
+  //   - has metadata (placeholder false for now)
+  // NOTE: hadMeaningfulTab (passive browsing) is intentionally NOT checked here.
+  //       crashSavePolicy is evaluated separately in SYNC_DETACH_BRANCH, not here.
+  function isBranchSaveEligible(node) {
+    if (node.userModified === true) return true;
+    if (node.customTitle) return true;
+    const parent = _parentMap.get(node.id);
+    if (parent && parent.id !== _workspace.tree.id) return true;
+    // CT020: Check ancestor branch descendantSavePolicy
+    let anc = parent;
+    while (anc) {
+      if (anc.kind === "branch" && anc.descendantSavePolicy === "inherit") {
+        if (isBranchSaveEligible(anc)) return true;
+      }
+      anc = _parentMap.get(anc.id);
+    }
+    if (hasMetadata(node)) return true;
+    return false;
+  }
+
+  // CT014/CT020: Returns true if the branch is meaningful (broad history-based check).
+  // DEPRECATED by CT020 — retained for reference and backward compatibility.
+  // SYNC_DETACH_BRANCH now uses isBranchSaveEligible() instead.
   // Meaningful if ANY of the following are true:
   //   - renamed from default (customTitle is non-empty)
   //   - moved under a non-root parent
